@@ -3,9 +3,10 @@ import rustworkx as rx
 from functools import lru_cache
 
 class RaptorRouter:
-    def __init__(self, graph: rx.PyDiGraph, start, max_transfers=2, interval=600):
+    def __init__(self, graph: rx.PyDiGraph, start, pedestrian=True, max_transfers=2, interval=600):
         """
         Инициализация маршрутизатора
+
         :param graph: Граф транспортной сети (узлы - остановки, ребра - соединения с атрибутами)
         :param start: Начальная остановка (ID узла или список координат)
         :param max_transfers: Максимальное число пересадок/итераций
@@ -47,6 +48,7 @@ class RaptorRouter:
     def get_available_stops(self, stop, trip_id):
         """
         Находит все остановки, достижимые из текущей остановки по заданному маршруту.
+
         :param stop: Текущая остановка
         :param trip_id: Идентификатор маршрута
         :return: Список пар (остановка, время прибытия)
@@ -79,7 +81,7 @@ class RaptorRouter:
 
         return available_stops
 
-    def main_calculator(self):
+    def main_calculator(self, pedestrian_cutoff=5):
         """Основной метод расчета временных меток с использованием очереди"""
         arrival_times = defaultdict(lambda: float('inf'))
         arrival_times[self.start_stop] = 0  # Время старта
@@ -106,10 +108,43 @@ class RaptorRouter:
                             arrival_times[available_stop[0]] = available_stop[1]
                         # по каждому маршруту у нас есть те остановки, которые он проходит. это - очередь обработки для следующей итерации
                         next_queue.add(available_stop[0])
-            # добавить трансферные переходы
+
+                # пешеходное плечо от этой остановки
+                # find connector
+                for edge in self.graph.out_edges(stop):
+                    edata=self.graph.get_edge_data(*edge)
+                    if edata['type']=='connector':
+                        connector=edge
+                        connected_pedestrian_node=edge[1]
+                        available_pedestrian_nodes=self.bfs_pedestrian(connected_pedestrian_node, cutoff=5)
+                        for available_node in available_pedestrian_nodes.keys():
+                            if available_node not in arrival_times.keys():
+                                arrival_times[available_node]=available_pedestrian_nodes[available_node]
+                            elif available_node in arrival_times.keys() and available_pedestrian_nodes[available_node]<arrival_times[available_node]:
+                                arrival_times[available_node]=available_pedestrian_nodes[available_node]
             queue=deque(next_queue)
         return arrival_times
+    def bfs_pedestrian(self, node, cutoff=5):
 
+        arrival_times = defaultdict(lambda: float('inf'))
+        arrival_times[node] = 0  # Время старта
+
+        queue = deque()
+        queue.append(node)
+
+        while queue:
+            next_queue = set()
+            current_node = queue.popleft()
+            current_time = arrival_times[current_node]
+            out_edges=[edge for edge in self.graph.out_edges(current_node) if edge[2]['type']=='pedestrian']
+            for out_edge in out_edges:
+                out_time = current_time + out_edge[2]['traveltime']
+                out_node = out_edge[1]
+                arrival_times[out_node] = out_time
+                if out_time<cutoff:
+                    next_queue.add(out_node)
+            queue=deque(next_queue)
+        return arrival_times
 
     def find_nearest_node(self, start):
         """Нахождение ближайшего узла к заданным координатам"""
@@ -158,4 +193,18 @@ def test2():
         print(bus.graph.nodes()[stop])
         print('traveltime', arrivals[stop])
         print([e[2]['ref'] for e in bus.graph.out_edges(stop)])
+
+def test3():
+    from TransitGraphStatic import TransitGraph, EnhTransitGraph, PedestrianGraph
+    bus=TransitGraph(trips=r"D:\osm2gtfs\kja\bus_trips.json", stops=r"D:\osm2gtfs\kja\bus_stops.json", s2s=r"D:\osm2gtfs\kja\bus_s2s.json", speed=21, type='bus')
+    print('bus', len(bus.graph.nodes()), len(bus.graph.edges()))
+
+    tram=TransitGraph(trips=r"D:\osm2gtfs\kja\tram_trips.json", stops=r"D:\osm2gtfs\kja\tram_stops.json", s2s=r"D:\osm2gtfs\kja\tram_s2s.json", speed=24, type='tram')
+    print('tram', len(tram.graph.nodes()), len(tram.graph.edges()))
+    
+    pedestrian=PedestrianGraph(pbf=r'd:\osm2gtfs\kja\krasnoyarsk.osm.pbf')
+    print('pedestrian', len(pedestrian.graph.nodes()), len(pedestrian.graph.edges()))
+
+    enh=EnhTransitGraph([bus.graph, tram.graph], pedestrian.graph)
+    print('init enhanced')
 test2()

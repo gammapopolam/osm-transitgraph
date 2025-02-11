@@ -119,8 +119,9 @@ class TransitGraph:
             print(f'Graph, after contraction: |V|={len(self.graph.nodes())}, |E|={len(self.graph.edges())}')
     def set_traveltime(self, length, speed):
         ms=(speed*1000)/60
-        traveltime=math.ceil(length/ms)
+        traveltime=round(length/ms, 3)
         return traveltime
+    
     def find_edge_idx_by_stops(self, efrom, eto, trip_id, s2s):
         for segment in s2s:
             if trip_id==segment['trip_id'] and efrom==segment['from'] and eto==segment['to']:
@@ -146,6 +147,7 @@ class TransitGraph:
                             return 1
                     else:
                         return 1
+
 class PedestrianGraphHandler(osmium.SimpleHandler):
     def __init__(self):
         super().__init__()
@@ -158,7 +160,11 @@ class PedestrianGraphHandler(osmium.SimpleHandler):
 
     def way(self, w):
         # Filter ways based on pedestrian tags
-        if any(tag.k in ["highway"] and tag.v in ["footway", "path", "pedestrian", "sidewalk"] for tag in w.tags):
+        # /!\ Add condition if include steps in pedestrian graph
+
+        # Красноярск хреново затегирован для пешехода, поэтому придется использовать весь транспортный граф
+        #if any(tag.k in ["highway"] and tag.v in ["footway", "path", "pedestrian", "sidewalk", "living_street", 'service', "steps"] for tag in w.tags):
+        if any(tag.k in ["highway"] for tag in w.tags):
             for i in range(len(w.nodes) - 1):
                 self.edges.append((w.nodes[i].ref, w.nodes[i + 1].ref))
 class PedestrianGraph():
@@ -170,51 +176,75 @@ class PedestrianGraph():
             edges = handler.edges
             self.graph=rx.PyDiGraph()
             node_idx = {node_id: self.graph.add_node({'name': 'None', 'id': 'null', 'type': 'pedestrian', 
-                                                      'geom': shapely.to_wkt(shapely.geometry.Point(lat, lon)),
+                                                      'geom': shapely.to_wkt(shapely.geometry.Point(lon, lat)),
                                                       'wc_access': 'yes', 'lat': lat, 'lon': lon}) for node_id, (lat, lon) in nodes.items()}
             for src, dst in edges:
                 if src in node_idx and dst in node_idx:
                     src_coords = nodes[src]
                     dst_coords = nodes[dst]
                     distance = geodesic(src_coords, dst_coords).meters
-                    self.graph.add_edge(node_idx[src], node_idx[dst], {'type': 'pedestrian', 'traveltime': distance//((3)*60), 
-                                                                       'geom': shapely.geometry.LineString([src_coords, dst_coords]).wkt, 
+                    self.graph.add_edge(node_idx[src], node_idx[dst], {'type': 'pedestrian', 'traveltime': distance/((3)*60), 
+                                                                       'geom': shapely.geometry.LineString([src_coords[::-1], dst_coords[::-1]]).wkt, 
                                                                        'length': distance, 'from': src, 'to': dst})
-                    self.graph.add_edge(node_idx[dst], node_idx[src], {'type': 'pedestrian', 'traveltime': distance//((3)*60), 
-                                                                       'geom': shapely.geometry.LineString([dst_coords, src_coords]).wkt, 
+                    self.graph.add_edge(node_idx[dst], node_idx[src], {'type': 'pedestrian', 'traveltime': distance/((3)*60), 
+                                                                       'geom': shapely.geometry.LineString([dst_coords[::-1], src_coords[::-1]]).wkt, 
                                                                        'length': distance, 'from': dst, 'to': src})
+
+            # Находим изолированные вершины (без входящих и исходящих рёбер)
+            isolated_nodes = [
+                node for node in self.graph.node_indices()
+                if self.graph.in_degree(node) == 0 and self.graph.out_degree(node) == 0
+            ]
+
+            # Удаляем изолированные вершины
+            for node in isolated_nodes:
+                self.graph.remove_node(node)
         except:
             raise UserWarning('Something wrong with pbf file')
-    
+
 class EnhTransitGraph:
-    def __init__(self, graphs, pedestrian, interchanges=True, interchange_threshold=200, walking=3):
+    def __init__(self, graphs, pedestrian, walking=3):
         self.walking=walking
+        # Сначала объединить транспортные графы в Enh
         if len(graphs)==1:
-            raise UserWarning("Can't merge one graph")
+            self.graph=graphs[0]
+            raise UserWarning("Only one transitgraph provided")
         else:
             self.graph=rx.digraph_union(graphs[0], graphs[1])
             for i in range(2, len(graphs)):
                 print(i)
                 self.graph=rx.digraph_union(self.graph, graphs[i])
-        # snap transitgraph and pedestriangraph
-        pedestrian_nodes = [
-            (i, d['lat'], d['lon']) for i, d in enumerate(pedestrian.nodes())
-        ]
+
+        # Потом объединить Enh и Pedestrian
+        self.graph=rx.digraph_union(self.graph, pedestrian)
+        # После объединения вершины получили новые node_idx, отфильтровать между собой type=pedestrian и остальные type
+        stop_nodes_idx=[]
+        pedestrian_nodes_idx=[]
+        for node in self.graph.node_indices():
+            data=self.graph[node]
+            if data['type']=='pedestrian':
+                pedestrian_nodes_idx.append(node)
+            else:
+                stop_nodes_idx.append((node, self.graph[node]))
+        # Добавить коннекторы
+        pedestrian_nodes=[(idx, self.graph[idx]['lat'], self.graph[idx]['lon']) for idx in pedestrian_nodes_idx]
+        #pedestrian_nodes = [
+        #    (i, d['lat'], d['lon']) for i, d in enumerate(pedestrian.nodes())
+        #]
         pedestrian_node_ids, pedestrian_lats, pedestrian_lons = zip(*pedestrian_nodes)
         kdtree = KDTree(np.c_[pedestrian_lats, pedestrian_lons])
-
+        
         # 2. Поиск ближайших вершин пешеходного графа к остановкам транспортного графа
-        for stop_node_id, stop_data in enumerate(self.graph.nodes()):
+        for stop_node_id, stop_data in stop_nodes_idx:
             stop_coords = (shapely.from_wkt(stop_data['geom']).y, shapely.from_wkt(stop_data['geom']).x)
 
             # Поиск ближайшей вершины пешеходного графа
             _, nearest_idx = kdtree.query(stop_coords)
             nearest_pedestrian_node_id = pedestrian_node_ids[nearest_idx]
-
+            #print(stop_node_id, nearest_pedestrian_node_id)
             # Добавление рёбер пересадки (в обе стороны)
-            pedestrian.add_edge(stop_node_id, nearest_pedestrian_node_id, {"type": "connector", 'traveltime': 1})
-            pedestrian.add_edge(nearest_pedestrian_node_id, stop_node_id, {"type": "connector", 'traveltime': 1})
-        self.graph=rx.digraph_union(self.graph, pedestrian)
+            self.graph.add_edge(stop_node_id, nearest_pedestrian_node_id, {"type": "connector", 'traveltime': 0.1, 'from': stop_node_id, 'to': nearest_pedestrian_node_id})
+            self.graph.add_edge(nearest_pedestrian_node_id, stop_node_id, {"type": "connector", 'traveltime': 0.1, 'from': nearest_pedestrian_node_id, 'to': stop_node_id})
 
     def geo_distance(self, p1, p2):
         return haversine((p1.y, p1.x), (p2.y, p2.x), 'm')
