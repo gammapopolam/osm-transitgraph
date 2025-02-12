@@ -1,6 +1,8 @@
 from collections import defaultdict, deque
 import rustworkx as rx
 from functools import lru_cache
+import geopandas as gpd
+import shapely
 
 class RaptorRouter:
     def __init__(self, graph: rx.PyDiGraph, start, pedestrian=True, max_transfers=2, interval=600):
@@ -41,7 +43,7 @@ class RaptorRouter:
                 self.stop_ids.append(node['id'])
 
     def get_trips_by_stop(self, stop):
-        trips=[e[2]['trip_id'] for e in self.graph.out_edges(stop)]
+        trips=[e[2]['trip_id'] for e in self.graph.out_edges(stop) if 'trip_id' in e[2].keys()]
         return trips
     
     @lru_cache(maxsize=None)  # Кэширование результатов
@@ -65,9 +67,10 @@ class RaptorRouter:
             visited_stops.add(current_stop)
 
             # Ищем следующую остановку на маршруте
+            out_edges = [e for e in self.graph.out_edges(current_stop) if 'trip_id' in e[2].keys()]
             next_stops = [
-                (e[1], e[2]['traveltime'] * 60)  # (остановка, время в пути)
-                for e in self.graph.out_edges(current_stop)
+                (e[1], e[2]['traveltime'])  # (остановка, время в пути)
+                for e in out_edges
                 if e[2]['trip_id'] == trip_id
             ]
 
@@ -89,67 +92,109 @@ class RaptorRouter:
         queue = deque()
         queue.append(self.start_stop)
 
-        for _ in range(self.max_transfers+1):
+        for _ in range(self.max_transfers + 1):
             next_queue = set()
             while queue:
-                # забрали остановку
+                # Забираем остановку из очереди
                 stop = queue.popleft()
-                # найти маршруты этой остановки
-                stop_trips=self.get_trips_by_stop(stop)
+                print(self.graph[stop])
+                # Находим маршруты этой остановки
+                stop_trips = self.get_trips_by_stop(stop)
                 for trip in stop_trips:
-                    # найти все остановки, достижимые этой поездкой
+                    # Находим все остановки, достижимые по этому маршруту
                     available_stops = self.get_available_stops(stop, trip)
-                    #print(trip, self.get_available_stops(stop, trip))
-                    # нашли. теперь надо добавить всё в arrival_times
-                    for available_stop in available_stops:
-                        if available_stop[0] not in arrival_times.keys(): # если остановки нет в словаре
-                            arrival_times[available_stop[0]] = available_stop[1]
-                        elif available_stop[0] in arrival_times.keys() and available_stop[1]<arrival_times[available_stop[0]]: # если остановка есть и метка прибытия меньше чем была
-                            arrival_times[available_stop[0]] = available_stop[1]
-                        # по каждому маршруту у нас есть те остановки, которые он проходит. это - очередь обработки для следующей итерации
-                        next_queue.add(available_stop[0])
-
-                # пешеходное плечо от этой остановки
-                # find connector
+                    # Обновляем времена прибытия
+                    for available_stop, arrival_time in available_stops:
+                        if arrival_time < arrival_times[available_stop]:
+                            arrival_times[available_stop] = arrival_time
+                            # Добавляем остановку в очередь для следующей итерации
+                            next_queue.add(available_stop)
+                
+                # Пешеходное плечо от этой остановки
                 for edge in self.graph.out_edges(stop):
-                    edata=self.graph.get_edge_data(*edge)
-                    if edata['type']=='connector':
-                        connector=edge
-                        connected_pedestrian_node=edge[1]
-                        available_pedestrian_nodes=self.bfs_pedestrian(connected_pedestrian_node, cutoff=5)
-                        for available_node in available_pedestrian_nodes.keys():
-                            if available_node not in arrival_times.keys():
-                                arrival_times[available_node]=available_pedestrian_nodes[available_node]
-                            elif available_node in arrival_times.keys() and available_pedestrian_nodes[available_node]<arrival_times[available_node]:
-                                arrival_times[available_node]=available_pedestrian_nodes[available_node]
-            queue=deque(next_queue)
-        return arrival_times
+                    edata = edge[2]
+                    if edata['type'] == 'connector' or edata['type'] == 'pedestrian':
+                        connected_pedestrian_node = edge[1]
+                        # Находим все пешеходные вершины, достижимые от connected_pedestrian_node
+                        available_pedestrian_nodes = self.bfs_pedestrian(connected_pedestrian_node, cutoff=pedestrian_cutoff)
+                        for available_node, pedestrian_time in available_pedestrian_nodes.items():
+                            total_time = arrival_times[stop] + pedestrian_time
+                            if total_time < arrival_times[available_node]:
+                                arrival_times[available_node] = total_time
+                                # Добавляем пешеходную вершину в очередь для следующей итерации
+                                if total_time <= pedestrian_cutoff:
+                                    next_queue.add(available_node)
+            
+            # После обработки всех остановок в текущей очереди, добавляем пешеходные вершины для всех достижимых остановок
+            for stop in list(arrival_times.keys()):  # Используем list для избежания изменения словаря во время итерации
+                # Проверяем, что stop является остановкой (не пешеходной вершиной)
+                if self.graph[stop]['type'] != 'pedestrian':
+                    for edge in self.graph.out_edges(stop):
+                        edata = edge[2]
+                        if edata['type'] == 'connector' or edata['type'] == 'pedestrian':
+                            connected_pedestrian_node = edge[1]
+                            available_pedestrian_nodes = self.bfs_pedestrian(connected_pedestrian_node, cutoff=pedestrian_cutoff)
+                            for available_node, pedestrian_time in available_pedestrian_nodes.items():
+                                total_time = arrival_times[stop] + pedestrian_time
+                                if total_time < arrival_times[available_node]:
+                                    arrival_times[available_node] = total_time
+                                    if total_time <= pedestrian_cutoff:
+                                        next_queue.add(available_node)
+            
+            # Обновляем очередь для следующей итерации
+            queue = deque(next_queue)
+        
+        return dict(arrival_times)
+    @lru_cache(maxsize=None)  # Кэширование результатов
     def bfs_pedestrian(self, node, cutoff=5):
+        """
+        Поиск в ширину (BFS) для пешеходных вершин.
 
+        :param node: Начальная вершина
+        :param cutoff: Время отсечки в секундах
+        :return: Словарь {вершина: время прибытия}
+        """
         arrival_times = defaultdict(lambda: float('inf'))
         arrival_times[node] = 0  # Время старта
 
         queue = deque()
-        queue.append(node)
+        queue.append((node, 0))  # (вершина, время прибытия)
 
         while queue:
-            next_queue = set()
-            current_node = queue.popleft()
-            current_time = arrival_times[current_node]
-            out_edges=[edge for edge in self.graph.out_edges(current_node) if edge[2]['type']=='pedestrian']
-            for out_edge in out_edges:
-                out_time = current_time + out_edge[2]['traveltime']
-                out_node = out_edge[1]
-                arrival_times[out_node] = out_time
-                if out_time<cutoff:
-                    next_queue.add(out_node)
-            queue=deque(next_queue)
+            current_node, current_time = queue.popleft()
+            
+            # Перебираем все исходящие пешеходные ребра
+            for edge in self.graph.out_edges(current_node):
+                edge_data = edge[2]
+                if edge_data['type'] == 'pedestrian':
+                    target_node = edge[1]
+                    travel_time = edge_data['traveltime']  # Время в секундах
+                    new_time = current_time + travel_time
+                    
+                    # Если время не превышает отсечку и новое время лучше текущего
+                    if new_time <= cutoff and new_time < arrival_times[target_node]:
+                        arrival_times[target_node] = new_time
+                        # Добавляем вершину в очередь только если время не превышает отсечку
+                        if new_time < cutoff:
+                            queue.append((target_node, new_time))
+        
         return arrival_times
 
     def find_nearest_node(self, start):
         """Нахождение ближайшего узла к заданным координатам"""
         # В данном примере просто возвращаем первый узел
         return self.stop_ids[0] if self.stop_ids else None
+    def vizard(self, arrival_times):
+        nodes=[]
+        for node in arrival_times.keys():
+            nodedata=self.graph[node]
+            nodedata['arrival']=arrival_times['node']
+            nodes.append(nodedata)
+        nodes_gdf=gpd.GeoDataFrame(nodes)
+        nodes_gdf['geom']=nodes_gdf['geom'].apply(lambda x: shapely.from_wkt(x))
+        nodes_gdf.set_geometry('geom', crs='EPSG:4326', inplace=True)
+        return nodes_gdf
+
 def test1():
         
     # Создание тестового графа
@@ -207,4 +252,16 @@ def test3():
 
     enh=EnhTransitGraph([bus.graph, tram.graph], pedestrian.graph)
     print('init enhanced')
-test2()
+    selected_stop=149
+
+    raptor=RaptorRouter(enh.graph, selected_stop, max_transfers=0, interval=480)
+    arrivals=raptor.main_calculator()
+
+    for stop in arrivals.keys():
+        print(stop, end=' ')
+        print(enh.graph.nodes()[stop], end=' ')
+        print('traveltime', arrivals[stop], end=' ')
+        out_edges=[e for e in enh.graph.out_edges(stop) if e[2]['type']!='pedestrian' and e[2]['type']!='connector']
+        print(out_edges)
+        print([e[2]['ref'] for e in out_edges])
+#test3()

@@ -1,13 +1,11 @@
 import rustworkx as rx
 import json
-import math
 import shapely
-from haversine import haversine
 import osmium
 from scipy.spatial import KDTree
 import numpy as np
 from geopy.distance import geodesic
-#from osmrx.main.roads import Roads
+import geopandas as gpd
 
 
 class TransitGraph:
@@ -162,7 +160,7 @@ class PedestrianGraphHandler(osmium.SimpleHandler):
         # Filter ways based on pedestrian tags
         # /!\ Add condition if include steps in pedestrian graph
 
-        # Красноярск хреново затегирован для пешехода, поэтому придется использовать весь транспортный граф
+        # Красноярск хреново затегирован для пешехода, поэтому придется использовать весь граф
         #if any(tag.k in ["highway"] and tag.v in ["footway", "path", "pedestrian", "sidewalk", "living_street", 'service', "steps"] for tag in w.tags):
         if any(tag.k in ["highway"] for tag in w.tags):
             for i in range(len(w.nodes) - 1):
@@ -217,6 +215,7 @@ class EnhTransitGraph:
 
         # Потом объединить Enh и Pedestrian
         self.graph=rx.digraph_union(self.graph, pedestrian)
+        
         # После объединения вершины получили новые node_idx, отфильтровать между собой type=pedestrian и остальные type
         stop_nodes_idx=[]
         pedestrian_nodes_idx=[]
@@ -226,11 +225,9 @@ class EnhTransitGraph:
                 pedestrian_nodes_idx.append(node)
             else:
                 stop_nodes_idx.append((node, self.graph[node]))
+        
         # Добавить коннекторы
         pedestrian_nodes=[(idx, self.graph[idx]['lat'], self.graph[idx]['lon']) for idx in pedestrian_nodes_idx]
-        #pedestrian_nodes = [
-        #    (i, d['lat'], d['lon']) for i, d in enumerate(pedestrian.nodes())
-        #]
         pedestrian_node_ids, pedestrian_lats, pedestrian_lons = zip(*pedestrian_nodes)
         kdtree = KDTree(np.c_[pedestrian_lats, pedestrian_lons])
         
@@ -245,7 +242,15 @@ class EnhTransitGraph:
             # Добавление рёбер пересадки (в обе стороны)
             self.graph.add_edge(stop_node_id, nearest_pedestrian_node_id, {"type": "connector", 'traveltime': 0.1, 'from': stop_node_id, 'to': nearest_pedestrian_node_id})
             self.graph.add_edge(nearest_pedestrian_node_id, stop_node_id, {"type": "connector", 'traveltime': 0.1, 'from': nearest_pedestrian_node_id, 'to': stop_node_id})
-
-    def geo_distance(self, p1, p2):
-        return haversine((p1.y, p1.x), (p2.y, p2.x), 'm')
-    
+    def vizard(self, type='stations'):
+        if type=='stations':
+            stations=[]
+            for node in self.graph.node_indices():
+                data=self.graph[node]
+                data['node_idx']=node
+                if data['type']!='pedestrian':
+                    stations.append(data)
+            stations_gdf=gpd.GeoDataFrame(stations)
+            stations_gdf['geom']=stations_gdf['geom'].apply(lambda x: shapely.from_wkt(x))
+            stations_gdf.set_geometry('geom', crs='EPSG:4326', inplace=True)
+            return stations_gdf
