@@ -166,7 +166,7 @@ class PedestrianGraphHandler(osmium.SimpleHandler):
             for i in range(len(w.nodes) - 1):
                 self.edges.append((w.nodes[i].ref, w.nodes[i + 1].ref))
 class PedestrianGraph():
-    def __init__(self, pbf):
+    def __init__(self, pbf, walking=2):
         handler = PedestrianGraphHandler()
         try:
             handler.apply_file(pbf, locations=True)
@@ -181,10 +181,10 @@ class PedestrianGraph():
                     src_coords = nodes[src]
                     dst_coords = nodes[dst]
                     distance = geodesic(src_coords, dst_coords).meters
-                    self.graph.add_edge(node_idx[src], node_idx[dst], {'type': 'pedestrian', 'traveltime': distance/((3)*60), 
+                    self.graph.add_edge(node_idx[src], node_idx[dst], {'type': 'pedestrian', 'traveltime': distance / ((walking*1000)/60), 
                                                                        'geom': shapely.geometry.LineString([src_coords[::-1], dst_coords[::-1]]).wkt, 
                                                                        'length': distance, 'from': src, 'to': dst})
-                    self.graph.add_edge(node_idx[dst], node_idx[src], {'type': 'pedestrian', 'traveltime': distance/((3)*60), 
+                    self.graph.add_edge(node_idx[dst], node_idx[src], {'type': 'pedestrian', 'traveltime': distance / ((walking*1000)/60), 
                                                                        'geom': shapely.geometry.LineString([dst_coords[::-1], src_coords[::-1]]).wkt, 
                                                                        'length': distance, 'from': dst, 'to': src})
 
