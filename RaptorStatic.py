@@ -3,30 +3,23 @@ import rustworkx as rx
 from functools import lru_cache
 import geopandas as gpd
 import shapely
+from heapq import heappush, heappop
+from geopy.distance import geodesic
+from TransitGraphStatic import EnhTransitGraph
 
 class RaptorRouter:
-    def __init__(self, graph: rx.PyDiGraph, start, pedestrian=True, max_transfers=2, interval=600):
+    def __init__(self, graph: EnhTransitGraph):
         """
         Инициализация маршрутизатора
 
-        :param graph: Граф транспортной сети (узлы - остановки, ребра - соединения с атрибутами)
-        :param start: Начальная остановка (ID узла или список координат)
-        :param max_transfers: Максимальное число пересадок/итераций
-        :param interval: Интервал движения транспорта (в секундах)
+        :param graph: Enhanced граф транспортной сети
         """
-        self.graph = graph
-        self.interval = interval
+        self.enh = graph
+        self.graph = graph.graph
         self.get_stop_ids()
         #print('stop_ids:', self.stop_ids)
         self.get_trip_ids()
         #print('trip_ids:', self.trip_ids)
-        
-        if isinstance(start, list):
-            self.start_stop = self.find_nearest_node(start)
-        else:
-            self.start_stop = start
-        
-        self.max_transfers = max_transfers
 
     def get_trip_ids(self):
         """Получение уникальных идентификаторов маршрутов"""
@@ -84,67 +77,106 @@ class RaptorRouter:
 
         return available_stops
 
-    def main_calculator(self, pedestrian_cutoff=5):
-        """Основной метод расчета временных меток с использованием очереди"""
-        arrival_times = defaultdict(lambda: float('inf'))
-        arrival_times[self.start_stop] = 0  # Время старта
+    def source_all_destinations_isochrones(self, start, max_transfers=1, pedestrian_cutoff=5, k_stops=4, bandwidth=0.003):
+        """Нахождение достижимых вершин из остановки
+        
+        :param start: точка начала (lon, lat)
+        :param max_transfers: Максимальное число пересадок/итераций
+        :param pedestrian_cutoff: Время отсечки пешеходного графа от остановки
 
-        queue = deque()
-        queue.append(self.start_stop)
-
-        for _ in range(self.max_transfers + 1):
-            next_queue = set()
-            while queue:
-                # Забираем остановку из очереди
-                stop = queue.popleft()
-                print(self.graph[stop])
-                # Находим маршруты этой остановки
-                stop_trips = self.get_trips_by_stop(stop)
-                for trip in stop_trips:
-                    # Находим все остановки, достижимые по этому маршруту
-                    available_stops = self.get_available_stops(stop, trip)
-                    # Обновляем времена прибытия
-                    for available_stop, arrival_time in available_stops:
-                        if arrival_time < arrival_times[available_stop]:
-                            arrival_times[available_stop] = arrival_time
-                            # Добавляем остановку в очередь для следующей итерации
-                            next_queue.add(available_stop)
-                
-                # Пешеходное плечо от этой остановки
-                for edge in self.graph.out_edges(stop):
-                    edata = edge[2]
-                    if edata['type'] == 'connector' or edata['type'] == 'pedestrian':
-                        connected_pedestrian_node = edge[1]
-                        # Находим все пешеходные вершины, достижимые от connected_pedestrian_node
-                        available_pedestrian_nodes = self.bfs_pedestrian(connected_pedestrian_node, cutoff=pedestrian_cutoff)
-                        for available_node, pedestrian_time in available_pedestrian_nodes.items():
-                            total_time = arrival_times[stop] + pedestrian_time
-                            if total_time < arrival_times[available_node]:
-                                arrival_times[available_node] = total_time
-                                # Добавляем пешеходную вершину в очередь для следующей итерации
-                                if total_time <= pedestrian_cutoff:
-                                    next_queue.add(available_node)
+        :return: arrival_times: dict, arrival_ntransfers: dict
+        """
+        self.max_transfers=max_transfers
             
-            # После обработки всех остановок в текущей очереди, добавляем пешеходные вершины для всех достижимых остановок
-            for stop in list(arrival_times.keys()):  # Используем list для избежания изменения словаря во время итерации
-                # Проверяем, что stop является остановкой (не пешеходной вершиной)
-                if self.graph[stop]['type'] != 'pedestrian':
+        arrival_times = defaultdict(lambda: float('inf'))
+
+        arrival_ntransfers = defaultdict(lambda: float('inf'))
+        
+
+        start_node_idx=self.enh.get_nearest_node_idx(start)
+        # довести точку старта к остановкам. BFS - для изохроны, A*/Djikstra - для минимума потребления. закинуть в arrival_times
+
+        nearest_stops=self.enh.get_kn_stops_node_idx(start, k_stops, bandwidth)
+        for stop in nearest_stops:
+            self.start_stop=stop
+            arrival_times[self.start_stop] = 0  # Время старта
+            arrival_ntransfers[self.start_stop] = 0
+            print(f'Calculating {self.start_stop} with {max_transfers} iters, {pedestrian_cutoff} min cutoff')
+
+            queue = deque()
+            queue.append((self.start_stop, 0))
+
+            for i in range(self.max_transfers + 1):
+                next_queue = set()
+                while queue:
+                    # Забираем остановку из очереди
+                    current_stop, current_time = queue.popleft()
+                    if self.graph[current_stop]['type']!='pedestrian':
+                        #print(self.graph[stop])
+                        # Находим маршруты этой остановки
+                        stop_trips = self.get_trips_by_stop(current_stop)
+                        for trip in stop_trips:
+                            # Находим все остановки, достижимые по этому маршруту
+
+                            #/!\ Добавить ребра пересадки и добавление их в next_queue
+                            available_stops = self.get_available_stops(current_stop, trip)
+                            # Обновляем времена прибытия
+                            for available_stop, travel_time in available_stops:
+                                total_time = current_time + travel_time
+
+                                if total_time < arrival_times[available_stop]:
+                                    arrival_times[available_stop] = total_time
+                                    arrival_ntransfers[available_stop] = i
+                                    # Добавляем остановку в очередь для следующей итерации
+                                    next_queue.add((available_stop, total_time))
+                                    # Пересадки
+                                    for edge in self.graph.out_edges(available_stop):
+                                        edata = edge[2]
+                                        if edata['type']=='interchange':
+                                            transferred = edge[1]
+                                            if total_time+edata['traveltime'] < arrival_times[transferred]:
+                                                arrival_times[transferred] = total_time+edata['traveltime']
+                                                arrival_ntransfers[transferred] = i
+                                                next_queue.add((transferred, total_time+edata['traveltime']))
+
+                    
+                    # Пешеходное плечо от этой остановки
                     for edge in self.graph.out_edges(stop):
                         edata = edge[2]
                         if edata['type'] == 'connector' or edata['type'] == 'pedestrian':
                             connected_pedestrian_node = edge[1]
+                            # Находим все пешеходные вершины, достижимые от connected_pedestrian_node
                             available_pedestrian_nodes = self.bfs_pedestrian(connected_pedestrian_node, cutoff=pedestrian_cutoff)
                             for available_node, pedestrian_time in available_pedestrian_nodes.items():
                                 total_time = arrival_times[stop] + pedestrian_time
                                 if total_time < arrival_times[available_node]:
                                     arrival_times[available_node] = total_time
+                                    arrival_ntransfers[available_node] = i
+                                    # Добавляем пешеходную вершину в очередь для следующей итерации
                                     if total_time <= pedestrian_cutoff:
-                                        next_queue.add(available_node)
-            
-            # Обновляем очередь для следующей итерации
-            queue = deque(next_queue)
+                                        next_queue.add((available_node, total_time))
+                
+                # После обработки всех остановок в текущей очереди, добавляем пешеходные вершины для всех достижимых остановок
+                for stop in list(arrival_times.keys()):  # Используем list для избежания изменения словаря во время итерации
+                    # Проверяем, что stop является остановкой (не пешеходной вершиной)
+                    if self.graph[stop]['type'] != 'pedestrian':
+                        for edge in self.graph.out_edges(stop):
+                            edata = edge[2]
+                            if edata['type'] == 'connector' or edata['type'] == 'pedestrian':
+                                connected_pedestrian_node = edge[1]
+                                available_pedestrian_nodes = self.bfs_pedestrian(connected_pedestrian_node, cutoff=pedestrian_cutoff)
+                                for available_node, pedestrian_time in available_pedestrian_nodes.items():
+                                    total_time = arrival_times[stop] + pedestrian_time
+                                    if total_time < arrival_times[available_node]:
+                                        arrival_times[available_node] = total_time
+                                        arrival_ntransfers[available_node] = i
+                                        if total_time <= pedestrian_cutoff:
+                                            next_queue.add((available_node, total_time))
+                
+                # Обновляем очередь для следующей итерации
+                queue = deque(next_queue)
         
-        return dict(arrival_times)
+        return dict(arrival_times), dict(arrival_ntransfers)
     @lru_cache(maxsize=None)  # Кэширование результатов
     def bfs_pedestrian(self, node, cutoff=5):
         """
@@ -180,10 +212,6 @@ class RaptorRouter:
         
         return arrival_times
 
-    def find_nearest_node(self, start):
-        """Нахождение ближайшего узла к заданным координатам"""
-        # В данном примере просто возвращаем первый узел
-        return self.stop_ids[0] if self.stop_ids else None
     def vizard(self, arrival_times):
         nodes=[]
         for node in arrival_times.keys():
@@ -194,6 +222,137 @@ class RaptorRouter:
         nodes_gdf['geom']=nodes_gdf['geom'].apply(lambda x: shapely.from_wkt(x))
         nodes_gdf.set_geometry('geom', crs='EPSG:4326', inplace=True)
         return nodes_gdf
+class Deprecated:
+    def source_all_destinations_calculator(self, start_point_id, all_points, max_transfers=3, pedestrian_cutoff=10):
+        """
+        Нахождение кратчайших путей между одной вершиной и всеми остальными
+
+        :param start_point_id: node_idx начальной точки
+        :param all_points: Список точек, которые нужно достичь `{point_id: node_idx}`
+        """
+        arrival_points = defaultdict(lambda: float('inf'))
+        for p in all_points.keys():
+            arrival_points[p] = float('inf')
+        arrival_points[start_point_id] = 0
+
+        # 1. Найти ближайшие остановки к начальной точке
+        nearest_stops = self.find_nearest_stops(start_point_id)
+
+        # 2. Запустить RAPTOR для каждой ближайшей остановки
+        for stop in nearest_stops:
+            stop_arrival_times = self.source_all_destinations_isochrones(stop, max_transfers=max_transfers, pedestrian_cutoff=pedestrian_cutoff)
+            
+            # 3. Обновить временные метки для всех точек в all_points
+            for point_id, point_node_idx in all_points.items():
+                if point_node_idx in stop_arrival_times:
+                    total_time = stop_arrival_times[point_node_idx]
+                    if total_time < arrival_points[point_id]:
+                        arrival_points[point_id] = total_time
+
+        return arrival_points
+
+    def find_nearest_stops(self, start_point_id):
+        """
+        Найти ближайшие остановки к начальной точке с помощью A*.
+
+        :param start_point_id: node_idx начальной точки
+        :return: Список ближайших остановок
+        """
+        nearest_stops = []
+        visited = set()
+        queue = [(0, start_point_id)]  # (время, вершина)
+
+        while queue:
+            current_time, current_node = heappop(queue)
+            if current_node in visited:
+                continue
+            visited.add(current_node)
+
+            # Если текущая вершина - остановка, добавляем её в список ближайших
+            if self.graph[current_node]['type'] != 'pedestrian':
+                nearest_stops.append(current_node)
+                continue
+
+            # Перебираем все исходящие ребра
+            for edge in self.graph.out_edges(current_node):
+                target_node = edge[1]
+                edge_data = edge[2]
+                if edge_data['type'] == 'pedestrian':
+                    travel_time = edge_data['traveltime']
+                    heappush(queue, (current_time + travel_time, target_node))
+
+        return nearest_stops
+
+    def a_star(self, start, goal):
+        """
+        Алгоритм A* для поиска кратчайшего пути между двумя вершинами.
+
+        :param start: Начальная вершина
+        :param goal: Целевая вершина
+        :return: Кратчайший путь и его стоимость
+        """
+        open_set = [(0, start)]
+        came_from = {}
+        g_score = {start: 0}
+        f_score = {start: self.heuristic(start, goal)}
+
+        while open_set:
+            _, current = heappop(open_set)
+            if current == goal:
+                return self.reconstruct_path(came_from, current), g_score[current]
+
+            for edge in self.graph.out_edges(current):
+                neighbor = edge[1]
+                edge_data = edge[2]
+                tentative_g_score = g_score[current] + edge_data['traveltime']
+
+                if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g_score
+                    f_score[neighbor] = tentative_g_score + self.heuristic(neighbor, goal)
+                    heappush(open_set, (f_score[neighbor], neighbor))
+
+        return None, float('inf')
+
+    def heuristic(self, node, goal):
+        """
+        Эвристическая функция для A* (например, расстояние между вершинами).
+
+        :param node: Текущая вершина
+        :param goal: Целевая вершина
+        :return: Оценка расстояния
+        """
+        # Здесь можно использовать географическое расстояние или другую метрику
+        node_geom=shapely.from_wkt(self.graph[node]['geom'])
+        goal_geom=shapely.from_wkt(self.graph[node]['geom'])
+        distance=geodesic((node_geom.y, node_geom.x), (goal_geom.y, goal_geom.x)).kilometers
+        return distance
+
+    def reconstruct_path(self, came_from, current):
+        """
+        Восстановление пути после выполнения A*.
+
+        :param came_from: Словарь, содержащий информацию о пути
+        :param current: Текущая вершина
+        :return: Список вершин, представляющих путь
+        """
+        path = [current]
+        while current in came_from:
+            current = came_from[current]
+            path.append(current)
+        return path[::-1]
+    def source_to_target_calculator(self):
+        """Расчет кратчайшего пути между вершинами по алгоритму RAPTOR"""
+        # 1. Найти ближайшиеу к точкам пешеходную вершину
+        # 2. Рассчитать путь от найденной пешеходной вершины до ближайшей остановки
+        # 3. Запустить RAPTOR. В конце каждого раунда найти ближайшую остановку к финальной вершине и рассчитать пешеходный путь до нее по A*
+        # 4. По мере прохождения раундов обновлять временные метки для всех вершин
+        pass
+    def origin_destination_calculator(self):
+        """Расчет временных меток для всех заданных пар вершин"""
+        # воспользоваться source_all_destinations_calculator
+        # он должен отдавать путь от выбранной точки до всех других - одна строка матрицы
+        pass
 
 def test1():
         

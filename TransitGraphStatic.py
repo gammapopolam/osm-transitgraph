@@ -6,6 +6,7 @@ from scipy.spatial import KDTree
 import numpy as np
 from geopy.distance import geodesic
 import geopandas as gpd
+from functools import lru_cache
 
 
 class TransitGraph:
@@ -201,6 +202,7 @@ class PedestrianGraph():
             raise UserWarning('Something wrong with pbf file')
 
 class EnhTransitGraph:
+    ## Всё таки надо задавать interchanges между видами транспорта хотя бы по ближайшим остановкам в округе
     def __init__(self, graphs, pedestrian, walking=3):
         self.walking=walking
         # Сначала объединить транспортные графы в Enh
@@ -218,30 +220,111 @@ class EnhTransitGraph:
         
         # После объединения вершины получили новые node_idx, отфильтровать между собой type=pedestrian и остальные type
         stop_nodes_idx=[]
+        stop_nodes_idx2=[]
         pedestrian_nodes_idx=[]
         for node in self.graph.node_indices():
             data=self.graph[node]
             if data['type']=='pedestrian':
                 pedestrian_nodes_idx.append(node)
             else:
+                stop_nodes_idx2.append(node)
                 stop_nodes_idx.append((node, self.graph[node]))
         
         # Добавить коннекторы
         pedestrian_nodes=[(idx, self.graph[idx]['lat'], self.graph[idx]['lon']) for idx in pedestrian_nodes_idx]
         pedestrian_node_ids, pedestrian_lats, pedestrian_lons = zip(*pedestrian_nodes)
-        kdtree = KDTree(np.c_[pedestrian_lats, pedestrian_lons])
+        ped_kdtree = KDTree(np.c_[pedestrian_lats, pedestrian_lons])
+
+        stop_nodes=[(idx, shapely.from_wkt(self.graph[idx]['geom']).y, shapely.from_wkt(self.graph[idx]['geom']).x) for idx in stop_nodes_idx2]
+        stop_node_ids, stop_lats, stop_lons = zip(*stop_nodes)
+        stop_kdtree = KDTree(np.c_[stop_lats, stop_lons])
+
+        # Сохранить К дерево пешеходного графа для поиска ближайших вершин
+        self.ped_kdtree=ped_kdtree
+        self.pedestrian_node_ids=pedestrian_node_ids
+
+        # Сохранить К дерево остановок для поиска 
+        self.stop_kdtree = stop_kdtree
+        self.stop_node_ids=stop_node_ids
         
+
         # 2. Поиск ближайших вершин пешеходного графа к остановкам транспортного графа
         for stop_node_id, stop_data in stop_nodes_idx:
             stop_coords = (shapely.from_wkt(stop_data['geom']).y, shapely.from_wkt(stop_data['geom']).x)
 
             # Поиск ближайшей вершины пешеходного графа
-            _, nearest_idx = kdtree.query(stop_coords)
+            _, nearest_idx = ped_kdtree.query(stop_coords)
             nearest_pedestrian_node_id = pedestrian_node_ids[nearest_idx]
             #print(stop_node_id, nearest_pedestrian_node_id)
             # Добавление рёбер пересадки (в обе стороны)
             self.graph.add_edge(stop_node_id, nearest_pedestrian_node_id, {"type": "connector", 'traveltime': 0.1, 'from': stop_node_id, 'to': nearest_pedestrian_node_id})
             self.graph.add_edge(nearest_pedestrian_node_id, stop_node_id, {"type": "connector", 'traveltime': 0.1, 'from': nearest_pedestrian_node_id, 'to': stop_node_id})
+
+    def init_interchanges(self, k=4, d=0.003):
+        tram_nodes = [node for node in self.graph.node_indices() if self.graph[node]['type']=='tram']
+        subway_nodes = [node for node in self.graph.node_indices() if self.graph[node]['type']=='subway']
+        commuter_nodes = [node for node in self.graph.node_indices() if self.graph[node]['type']=='commuter']
+        #bus_nodes = [node for node in self.graph.node_indices() if self.graph[node]['type']=='bus']
+         
+        if len(tram_nodes)>0: 
+            for tram_node in tram_nodes:
+                tlon, tlat = shapely.from_wkt(self.graph[tram_node]['geom']).xy
+                tram_point=(tlat[0], tlon[0])
+                nearest_stops = self.get_kn_stops_node_idx(tram_point, k, d)
+                
+                for stop in nearest_stops:
+                    #if self.graph[stop]['type']!='tram':
+                    #print(f'init tram {self.graph[tram_node]['name']}--{self.graph[stop]['name']}')
+                    self.graph.add_edge(tram_node, stop, {'type': 'interchange', 'traveltime': 1, 'from': tram_node, 'to': stop})
+                    self.graph.add_edge(stop, tram_node, {'type': 'interchange', 'traveltime': 1, 'from': stop, 'to': tram_node})
+        if len(subway_nodes)>0:
+            for sw_node in subway_nodes:
+                swlon, swlat = shapely.from_wkt(self.graph[sw_node]['geom']).xy
+                sw_point=(swlat[0], swlon[0])
+                nearest_stops = self.get_kn_stops_node_idx(sw_point, k, d)
+                for stop in nearest_stops:
+                    if self.graph[stop]['type']!='subway':
+                        #print(f'init subway {self.graph[sw_node]['name']}--{self.graph[stop]['name']}')
+                        self.graph.add_edge(sw_node, stop, {'type': 'interchange', 'traveltime': 10, 'from': sw_node, 'to': stop})
+                        self.graph.add_edge(stop, sw_node, {'type': 'interchange', 'traveltime': 10, 'from': stop, 'to': sw_node})
+                    else:
+                        self.graph.add_edge(sw_node, stop, {'type': 'interchange', 'traveltime': 7, 'from': sw_node, 'to': stop})
+                        self.graph.add_edge(stop, sw_node, {'type': 'interchange', 'traveltime': 7, 'from': stop, 'to': sw_node})
+        if len(commuter_nodes)>0:
+            for c_node in commuter_nodes:
+                clon, clat = shapely.from_wkt(self.graph[c_node]['geom'])
+                c_point=(clat[0], clon[0])
+                nearest_stops = self.get_kn_stops_node_idx(c_point, k, d)
+                for stop in nearest_stops:
+                    #print(f'init commuter {self.graph[c_node]['name']}--{self.graph[stop]['name']}')
+                    self.graph.add_edge(c_node, stop, {'type': 'interchange', 'traveltime': 10, 'from': c_node, 'to': stop})
+                    self.graph.add_edge(stop, c_node, {'type': 'interchange', 'traveltime': 10, 'from': stop, 'to': c_node})
+                    
+    @lru_cache(maxsize=None)  # Кэширование результатов
+    def get_nearest_node_idx(self, point):
+        """
+        Найти ближайшую пешеходную вершину к точке
+
+        :param point: кортеж формата (lon, lat)
+        :return: nearest_idx
+        """
+        _, nearest_idx = self.ped_kdtree.query(point)
+        return self.pedestrian_node_ids[nearest_idx]
+    
+    @lru_cache(maxsize=None)  # Кэширование результатов
+    def get_kn_stops_node_idx(self, point, k, d):
+        """
+        Найти ближайшие k остановок к точке в пределах d
+
+        :param point: кортеж формата (lon, lat)
+        :return: list nearest_idx
+        """
+        _, nearest_idxs = self.stop_kdtree.query(point, k=k, distance_upper_bound=d)
+        if len(nearest_idxs)>0:
+            #print(nearest_idxs, self.stop_node_ids)
+            return list(set([nearest_idx for nearest_idx in nearest_idxs]))
+        else:
+            return []
     def vizard(self, type='stations'):
         if type=='stations':
             stations=[]

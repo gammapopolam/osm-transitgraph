@@ -2,3 +2,6 @@ operativka.ipynb
 pedestrian_graph_tests.ipynb
 __pycache__/*
 ped_graph.gpkg
+critical*
+ped_graph*
+kja_tests*
