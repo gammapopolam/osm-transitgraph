@@ -77,7 +77,7 @@ class RaptorRouter:
 
         return available_stops
 
-    def source_all_destinations_isochrones(self, start, max_transfers=1, pedestrian_cutoff=5, k_stops=4, bandwidth=0.003):
+    def source_all_destinations_isochrones(self, start, max_transfers=1, pedestrian=True, pedestrian_cutoff=5, k_stops=4, bandwidth=0.003):
         """Нахождение достижимых вершин из остановки
         
         :param start: точка начала (lon, lat)
@@ -92,16 +92,19 @@ class RaptorRouter:
 
         arrival_ntransfers = defaultdict(lambda: float('inf'))
         
-
-        start_node_idx=self.enh.get_nearest_node_idx(start)
-        # довести точку старта к остановкам. BFS - для изохроны, A*/Djikstra - для минимума потребления. закинуть в arrival_times
+        if pedestrian==True:
+            start_node_idx=self.enh.get_nearest_node_idx(start)
+        # довести точку старта к остановкам. BFS - для изохроны, A*/Djikstra - для минимума памяти. закинуть в arrival_times
 
         nearest_stops=self.enh.get_kn_stops_node_idx(start, k_stops, bandwidth)
+
+        #TODO: поиск конечных вершин - вершин, из которых нет выходящих ребер != pedestrian, connector, interchange
+        # уже после нахождения меток в arrival_times
         for stop in nearest_stops:
             self.start_stop=stop
             arrival_times[self.start_stop] = 0  # Время старта
             arrival_ntransfers[self.start_stop] = 0
-            print(f'Calculating {self.start_stop} with {max_transfers} iters, {pedestrian_cutoff} min cutoff')
+            #print(f'Calculating {self.start_stop} with {max_transfers} iters, {pedestrian_cutoff} min cutoff')
 
             queue = deque()
             queue.append((self.start_stop, 0))
@@ -139,44 +142,48 @@ class RaptorRouter:
                                                 arrival_ntransfers[transferred] = i
                                                 next_queue.add((transferred, total_time+edata['traveltime']))
 
-                    
-                    # Пешеходное плечо от этой остановки
-                    for edge in self.graph.out_edges(stop):
-                        edata = edge[2]
-                        if edata['type'] == 'connector' or edata['type'] == 'pedestrian':
-                            connected_pedestrian_node = edge[1]
-                            # Находим все пешеходные вершины, достижимые от connected_pedestrian_node
-                            available_pedestrian_nodes = self.bfs_pedestrian(connected_pedestrian_node, cutoff=pedestrian_cutoff)
-                            for available_node, pedestrian_time in available_pedestrian_nodes.items():
-                                total_time = arrival_times[stop] + pedestrian_time
-                                if total_time < arrival_times[available_node]:
-                                    arrival_times[available_node] = total_time
-                                    arrival_ntransfers[available_node] = i
-                                    # Добавляем пешеходную вершину в очередь для следующей итерации
-                                    if total_time <= pedestrian_cutoff:
-                                        next_queue.add((available_node, total_time))
-                
-                # После обработки всех остановок в текущей очереди, добавляем пешеходные вершины для всех достижимых остановок
-                for stop in list(arrival_times.keys()):  # Используем list для избежания изменения словаря во время итерации
-                    # Проверяем, что stop является остановкой (не пешеходной вершиной)
-                    if self.graph[stop]['type'] != 'pedestrian':
+                    if pedestrian==True:
+                        # Пешеходное плечо от этой остановки
                         for edge in self.graph.out_edges(stop):
                             edata = edge[2]
                             if edata['type'] == 'connector' or edata['type'] == 'pedestrian':
                                 connected_pedestrian_node = edge[1]
+                                # Находим все пешеходные вершины, достижимые от connected_pedestrian_node
                                 available_pedestrian_nodes = self.bfs_pedestrian(connected_pedestrian_node, cutoff=pedestrian_cutoff)
                                 for available_node, pedestrian_time in available_pedestrian_nodes.items():
                                     total_time = arrival_times[stop] + pedestrian_time
                                     if total_time < arrival_times[available_node]:
                                         arrival_times[available_node] = total_time
                                         arrival_ntransfers[available_node] = i
+                                        # Добавляем пешеходную вершину в очередь для следующей итерации
                                         if total_time <= pedestrian_cutoff:
                                             next_queue.add((available_node, total_time))
+                if pedestrian==True:
+                    # После обработки всех остановок в текущей очереди, добавляем пешеходные вершины для всех достижимых остановок
+                    for stop in list(arrival_times.keys()):  # Используем list для избежания изменения словаря во время итерации
+                        # Проверяем, что stop является остановкой (не пешеходной вершиной)
+                        if self.graph[stop]['type'] != 'pedestrian':
+                            for edge in self.graph.out_edges(stop):
+                                edata = edge[2]
+                                if edata['type'] == 'connector' or edata['type'] == 'pedestrian':
+                                    connected_pedestrian_node = edge[1]
+                                    available_pedestrian_nodes = self.bfs_pedestrian(connected_pedestrian_node, cutoff=pedestrian_cutoff)
+                                    for available_node, pedestrian_time in available_pedestrian_nodes.items():
+                                        total_time = arrival_times[stop] + pedestrian_time
+                                        if total_time < arrival_times[available_node]:
+                                            arrival_times[available_node] = total_time
+                                            arrival_ntransfers[available_node] = i
+                                            if total_time <= pedestrian_cutoff:
+                                                next_queue.add((available_node, total_time))
                 
                 # Обновляем очередь для следующей итерации
                 queue = deque(next_queue)
-        
-        return dict(arrival_times), dict(arrival_ntransfers)
+        endpoints = list()
+        for node in arrival_times.keys():
+            out_transit_nodes=[edge for edge in self.graph.out_edges(node) if edge[2]['type']!='pedestrian' and edge[2]['type']!='connector' and edge[2]['type']!='interchange']
+            if len(out_transit_nodes)==0:
+                endpoints.append(node)
+        return dict(arrival_times), dict(arrival_ntransfers), endpoints
     @lru_cache(maxsize=None)  # Кэширование результатов
     def bfs_pedestrian(self, node, cutoff=5):
         """
@@ -212,16 +219,31 @@ class RaptorRouter:
         
         return arrival_times
 
-    def vizard(self, arrival_times):
+    def get_gdf(self, arrival_times, arrival_ntransfers):
         nodes=[]
         for node in arrival_times.keys():
             nodedata=self.graph[node]
-            nodedata['arrival']=arrival_times['node']
+            nodedata['arrival']=arrival_times[node]
+            nodedata['transfers']=arrival_ntransfers[node]
             nodes.append(nodedata)
         nodes_gdf=gpd.GeoDataFrame(nodes)
         nodes_gdf['geom']=nodes_gdf['geom'].apply(lambda x: shapely.from_wkt(x))
         nodes_gdf.set_geometry('geom', crs='EPSG:4326', inplace=True)
         return nodes_gdf
+    
+    def get_td2(self, endpoints):
+        subgraph_nodes = endpoints
+        subg = self.graph.subgraph(subgraph_nodes)
+
+        sh_p = rx.digraph_floyd_warshall(subg, weight_fn=lambda edge: edge['traveltime'])
+        max_diameter = 0
+        for i in subgraph_nodes:
+            for j in subgraph_nodes:
+                if i != j and sh_p[i][j] is not None:
+                    if sh_p[i][j] > max_diameter:
+                        max_diameter = sh_p[i][j]
+        return max_diameter
+
 class Deprecated:
     def source_all_destinations_calculator(self, start_point_id, all_points, max_transfers=3, pedestrian_cutoff=10):
         """

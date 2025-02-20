@@ -30,11 +30,13 @@ class BBoxFilterHandler(osm.SimpleHandler):
 
 # Define the bounding box for Krasnoyarsk
 #bbox = (92.7222, 55.9887, 93.1123, 56.0123)
-bbox = (92.6, 55.8, 93.2, 56.2)
+#bbox = (92.6, 55.8, 93.2, 56.2)
+# 59,7821°  30,0477° : 60,1111°  30,543°
+bbox = (30.04, 59.75, 30.6, 60.2)
 
 # Input and output file paths
-input_pbf = r'd:\osm2gtfs\kja\krasnoyarsk_krai-latest.osm.pbf'
-output_pbf = r'd:\osm2gtfs\kja\krasnoyarsk.osm.pbf'
+input_pbf = r'd:\osm2gtfs\ru_spe_osmgrabber\saint_petersburg-latest.osm.pbf'
+output_pbf = r'd:\osm2gtfs\ru_spe_osmgrabber\saint_petersburg-filter.osm.pbf'
 
 # Create a writer for the output file
 writer = osm.SimpleWriter(output_pbf)

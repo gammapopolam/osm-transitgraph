@@ -10,7 +10,7 @@ from functools import lru_cache
 
 
 class TransitGraph:
-    def __init__(self, trips=None, stops=None, s2s=None, speed=27, type='subway', interchanges=None, wc_mode=False, keep_limited=True):
+    def __init__(self, trips=None, stops=None, s2s=None, speed=27, type='subway', wc_mode=False, keep_limited=True):
         self.type=type
         self.speed=speed
         self.s2s=[]
@@ -22,16 +22,17 @@ class TransitGraph:
             self.stops.extend(json.loads(f.read()))
         with open(trips, mode='r', encoding='utf-8') as f:
             self.trips.extend(json.loads(f.read()))
-        
-        if interchanges is not None:
-            with open(interchanges, mode='r', encoding='utf-8') as f:
-                self.interchanges=json.loads(f.read())
-        else:
-            self.interchanges=None
+
         graph=rx.PyDiGraph()
         # Add node indices in stops, add nodes in graph
         for stop in self.stops:
-            node_idx=graph.add_node({'name': stop['stop_name'], 'id': stop['stop_id'], 'type': self.type, 'geom': stop['stop_shape'], 'wc_access': stop['wheelchair'], 'lat': shapely.from_wkt(stop['stop_shape']).y, 'lon': shapely.from_wkt(stop['stop_shape']).x})
+            node_idx=graph.add_node({'name': stop['stop_name'], 
+                                     'id': stop['stop_id'], 
+                                     'type': self.type, 
+                                     'geom': stop['stop_shape'], 
+                                     'wc_access': stop['wheelchair'], 
+                                     'lat': shapely.from_wkt(stop['stop_shape']).y, 
+                                     'lon': shapely.from_wkt(stop['stop_shape']).x})
             stop['node_idx']=node_idx
         # Add edge indices in s2s, add edges in graph
         for i in range(len(self.s2s)):
@@ -148,8 +149,9 @@ class TransitGraph:
                         return 1
 
 class PedestrianGraphHandler(osmium.SimpleHandler):
-    def __init__(self):
+    def __init__(self, tags):
         super().__init__()
+        self.highway_filter = tags
         self.edges = []
         self.nodes = {}
 
@@ -158,17 +160,14 @@ class PedestrianGraphHandler(osmium.SimpleHandler):
         #print(self.nodes[n.id])
 
     def way(self, w):
-        # Filter ways based on pedestrian tags
-        # /!\ Add condition if include steps in pedestrian graph
-
         # Красноярск хреново затегирован для пешехода, поэтому придется использовать весь граф
         #if any(tag.k in ["highway"] and tag.v in ["footway", "path", "pedestrian", "sidewalk", "living_street", 'service', "steps"] for tag in w.tags):
-        if any(tag.k in ["highway"] for tag in w.tags):
+        if any(tag.k in ["highway"] and tag.v in self.highway_filter for tag in w.tags):
             for i in range(len(w.nodes) - 1):
                 self.edges.append((w.nodes[i].ref, w.nodes[i + 1].ref))
 class PedestrianGraph():
-    def __init__(self, pbf, walking=2):
-        handler = PedestrianGraphHandler()
+    def __init__(self, pbf, tags: list, walking=2):
+        handler = PedestrianGraphHandler(tags)
         try:
             handler.apply_file(pbf, locations=True)
             nodes = handler.nodes
@@ -202,8 +201,13 @@ class PedestrianGraph():
             raise UserWarning('Something wrong with pbf file')
 
 class EnhTransitGraph:
-    ## Всё таки надо задавать interchanges между видами транспорта хотя бы по ближайшим остановкам в округе
-    def __init__(self, graphs, pedestrian, walking=3):
+    def __init__(self, graphs, pedestrian=None, walking=3):
+        """Инициализация объединенных транспортных и пешеходного графов
+        
+        :param graphs: список графов `rx.PyDiGraph`
+        :param pedestrian: пешеходный граф
+        :param walking: скорость пешехода, км/ч
+        """
         self.walking=walking
         # Сначала объединить транспортные графы в Enh
         if len(graphs)==1:
@@ -215,66 +219,77 @@ class EnhTransitGraph:
                 print(i)
                 self.graph=rx.digraph_union(self.graph, graphs[i])
 
-        # Потом объединить Enh и Pedestrian
-        self.graph=rx.digraph_union(self.graph, pedestrian)
-        
-        # После объединения вершины получили новые node_idx, отфильтровать между собой type=pedestrian и остальные type
         stop_nodes_idx=[]
         stop_nodes_idx2=[]
-        pedestrian_nodes_idx=[]
         for node in self.graph.node_indices():
             data=self.graph[node]
-            if data['type']=='pedestrian':
-                pedestrian_nodes_idx.append(node)
-            else:
+            if data['type']!='pedestrian':
                 stop_nodes_idx2.append(node)
                 stop_nodes_idx.append((node, self.graph[node]))
-        
-        # Добавить коннекторы
-        pedestrian_nodes=[(idx, self.graph[idx]['lat'], self.graph[idx]['lon']) for idx in pedestrian_nodes_idx]
-        pedestrian_node_ids, pedestrian_lats, pedestrian_lons = zip(*pedestrian_nodes)
-        ped_kdtree = KDTree(np.c_[pedestrian_lats, pedestrian_lons])
-
         stop_nodes=[(idx, shapely.from_wkt(self.graph[idx]['geom']).y, shapely.from_wkt(self.graph[idx]['geom']).x) for idx in stop_nodes_idx2]
         stop_node_ids, stop_lats, stop_lons = zip(*stop_nodes)
         stop_kdtree = KDTree(np.c_[stop_lats, stop_lons])
-
-        # Сохранить К дерево пешеходного графа для поиска ближайших вершин
-        self.ped_kdtree=ped_kdtree
-        self.pedestrian_node_ids=pedestrian_node_ids
-
         # Сохранить К дерево остановок для поиска 
         self.stop_kdtree = stop_kdtree
         self.stop_node_ids=stop_node_ids
-        
 
-        # 2. Поиск ближайших вершин пешеходного графа к остановкам транспортного графа
-        for stop_node_id, stop_data in stop_nodes_idx:
-            stop_coords = (shapely.from_wkt(stop_data['geom']).y, shapely.from_wkt(stop_data['geom']).x)
+        if pedestrian is not None:
+            # Потом объединить Enh и Pedestrian
+            self.graph=rx.digraph_union(self.graph, pedestrian)
+            
+            # После объединения вершины получили новые node_idx, отфильтровать между собой type=pedestrian и остальные type
+            
+            pedestrian_nodes_idx=[]
+            for node in self.graph.node_indices():
+                data=self.graph[node]
+                if data['type']=='pedestrian':
+                    pedestrian_nodes_idx.append(node)
+                
+            
+            # Добавить коннекторы
+            pedestrian_nodes=[(idx, self.graph[idx]['lat'], self.graph[idx]['lon']) for idx in pedestrian_nodes_idx]
+            pedestrian_node_ids, pedestrian_lats, pedestrian_lons = zip(*pedestrian_nodes)
+            ped_kdtree = KDTree(np.c_[pedestrian_lats, pedestrian_lons])
+            
+            # Сохранить К дерево пешеходного графа для поиска ближайших вершин
+            self.ped_kdtree=ped_kdtree
+            self.pedestrian_node_ids=pedestrian_node_ids
 
-            # Поиск ближайшей вершины пешеходного графа
-            _, nearest_idx = ped_kdtree.query(stop_coords)
-            nearest_pedestrian_node_id = pedestrian_node_ids[nearest_idx]
-            #print(stop_node_id, nearest_pedestrian_node_id)
-            # Добавление рёбер пересадки (в обе стороны)
-            self.graph.add_edge(stop_node_id, nearest_pedestrian_node_id, {"type": "connector", 'traveltime': 0.1, 'from': stop_node_id, 'to': nearest_pedestrian_node_id})
-            self.graph.add_edge(nearest_pedestrian_node_id, stop_node_id, {"type": "connector", 'traveltime': 0.1, 'from': nearest_pedestrian_node_id, 'to': stop_node_id})
+            # Поиск ближайших вершин пешеходного графа к остановкам транспортного графа
+            for stop_node_id, stop_data in stop_nodes_idx:
+                stop_coords = (shapely.from_wkt(stop_data['geom']).y, shapely.from_wkt(stop_data['geom']).x)
+
+                # Поиск ближайшей вершины пешеходного графа
+                _, nearest_idx = ped_kdtree.query(stop_coords)
+                nearest_pedestrian_node_id = pedestrian_node_ids[nearest_idx]
+                #print(stop_node_id, nearest_pedestrian_node_id)
+                # Добавление рёбер пересадки (в обе стороны)
+                self.graph.add_edge(stop_node_id, nearest_pedestrian_node_id, {"type": "connector", 'traveltime': 0.1, 'from': stop_node_id, 'to': nearest_pedestrian_node_id})
+                self.graph.add_edge(nearest_pedestrian_node_id, stop_node_id, {"type": "connector", 'traveltime': 0.1, 'from': nearest_pedestrian_node_id, 'to': stop_node_id})
 
     def init_interchanges(self, k=4, d=0.003):
+        """ Инициализация ребер пересадки в объединенном транспортном графе. 
+        Строит ребра `type=interchange` между видами транспорта (subway, commuter, tram, bus) до 2k раз
+
+        :param k: количество ближайших остановок
+        :param d: ширина поиска в градусах (0.003 по умолчанию)"""
+        # Dirty interchanges
         tram_nodes = [node for node in self.graph.node_indices() if self.graph[node]['type']=='tram']
         subway_nodes = [node for node in self.graph.node_indices() if self.graph[node]['type']=='subway']
         commuter_nodes = [node for node in self.graph.node_indices() if self.graph[node]['type']=='commuter']
-        #bus_nodes = [node for node in self.graph.node_indices() if self.graph[node]['type']=='bus']
-         
+        bus_nodes = [node for node in self.graph.node_indices() if self.graph[node]['type']=='bus']
+        
         if len(tram_nodes)>0: 
             for tram_node in tram_nodes:
                 tlon, tlat = shapely.from_wkt(self.graph[tram_node]['geom']).xy
                 tram_point=(tlat[0], tlon[0])
                 nearest_stops = self.get_kn_stops_node_idx(tram_point, k, d)
-                
+                #print(nearest_stops)
                 for stop in nearest_stops:
                     #if self.graph[stop]['type']!='tram':
-                    #print(f'init tram {self.graph[tram_node]['name']}--{self.graph[stop]['name']}')
+                    #print(f'init tram {tram_node}, {stop}')
+                    #print(f'init tram {self.graph[tram_node]['name']}', end=' ')
+                    #print(f'-- {self.graph[stop]['name']}')
                     self.graph.add_edge(tram_node, stop, {'type': 'interchange', 'traveltime': 1, 'from': tram_node, 'to': stop})
                     self.graph.add_edge(stop, tram_node, {'type': 'interchange', 'traveltime': 1, 'from': stop, 'to': tram_node})
         if len(subway_nodes)>0:
@@ -284,7 +299,7 @@ class EnhTransitGraph:
                 nearest_stops = self.get_kn_stops_node_idx(sw_point, k, d)
                 for stop in nearest_stops:
                     if self.graph[stop]['type']!='subway':
-                        #print(f'init subway {self.graph[sw_node]['name']}--{self.graph[stop]['name']}')
+                        print(f'init subway {self.graph[sw_node]['name']}--{self.graph[stop]['name']}')
                         self.graph.add_edge(sw_node, stop, {'type': 'interchange', 'traveltime': 10, 'from': sw_node, 'to': stop})
                         self.graph.add_edge(stop, sw_node, {'type': 'interchange', 'traveltime': 10, 'from': stop, 'to': sw_node})
                     else:
@@ -299,7 +314,18 @@ class EnhTransitGraph:
                     #print(f'init commuter {self.graph[c_node]['name']}--{self.graph[stop]['name']}')
                     self.graph.add_edge(c_node, stop, {'type': 'interchange', 'traveltime': 10, 'from': c_node, 'to': stop})
                     self.graph.add_edge(stop, c_node, {'type': 'interchange', 'traveltime': 10, 'from': stop, 'to': c_node})
-                    
+        if len(bus_nodes)>0: 
+            for b_node in bus_nodes:
+                blon, blat = shapely.from_wkt(self.graph[b_node]['geom']).xy
+                b_point=(blat[0], blon[0])
+                nearest_stops = self.get_kn_stops_node_idx(b_point, k, d)
+                
+                for stop in nearest_stops:
+                    #if self.graph[stop]['type']!='tram':
+                    #print(f'init tram {self.graph[tram_node]['name']}--{self.graph[stop]['name']}')
+                    if self.graph[stop]['type']=='bus':
+                        self.graph.add_edge(b_node, stop, {'type': 'interchange', 'traveltime': 1, 'from': b_node, 'to': stop})
+                        self.graph.add_edge(stop, b_node, {'type': 'interchange', 'traveltime': 1, 'from': stop, 'to': b_node})
     @lru_cache(maxsize=None)  # Кэширование результатов
     def get_nearest_node_idx(self, point):
         """
@@ -309,7 +335,8 @@ class EnhTransitGraph:
         :return: nearest_idx
         """
         _, nearest_idx = self.ped_kdtree.query(point)
-        return self.pedestrian_node_ids[nearest_idx]
+        if self.graph.has_node(nearest_idx):
+            return nearest_idx
     
     @lru_cache(maxsize=None)  # Кэширование результатов
     def get_kn_stops_node_idx(self, point, k, d):
@@ -322,7 +349,7 @@ class EnhTransitGraph:
         _, nearest_idxs = self.stop_kdtree.query(point, k=k, distance_upper_bound=d)
         if len(nearest_idxs)>0:
             #print(nearest_idxs, self.stop_node_ids)
-            return list(set([nearest_idx for nearest_idx in nearest_idxs]))
+            return list(set([nearest_idx for nearest_idx in nearest_idxs if self.graph.has_node(nearest_idx)]))
         else:
             return []
     def vizard(self, type='stations'):
