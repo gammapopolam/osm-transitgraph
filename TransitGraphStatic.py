@@ -53,13 +53,120 @@ class TransitGraph:
         if wc_mode:
             self.edge_contractor(keep_limited=keep_limited)
         
+    def edge_contractor(self, keep_limited=True):
+        for trip in self.trips:
+            sequence = trip['stop_sequence']
+            trip_id = trip['route_id']
+            print(trip_id, trip['ref'])
+            
+            si = [i for i in range(len(sequence))]
+            sa = [self.find_access_by_id(s, self.stops) for s in sequence]
+            sn = [self.find_idx_by_id(s, self.stops) for s in sequence]
+            se = [int(self.find_edge_idx_by_stops(sequence[i], sequence[i+1], trip_id, self.s2s)['edge_idx']) for i in range(len(sequence)-1)] #Elen = Vlen-1
+            se.append(None)
+
+            if trip['wheelchair'] == 'yes':
+                pass
+            elif trip['wheelchair'] == 'limited' and keep_limited:
+                pass
+            else:
+                print(f'deleting trip {trip_id}: {trip["wheelchair"]} tag')
+                for edge in se:
+                    if edge is not None:
+                        self.graph.remove_edge_from_index(edge['edge_idx'])
+                continue
+            sz = list(zip(si, sequence, sa, sn, se)) #sequence, acces, node_idx, edge_idx
+            
+            sz_new = []
+            print(sz)
+            for j in range(len(sz)): #last element is finish
+                i, s, a, n, e = sz[j]
+                if keep_limited == True:
+                    if a > 0:
+                        sz_new.append([i, s, a, n, e])
+                else:
+                    if a > 1:
+                        sz_new.append([i, s, a, n, e])
+            print(sz_new)
+            if len(sz_new) != len(sz):
+                for j in range(len(sz_new)-1): # watching legs
+                    start, end = sz_new[j], sz_new[j+1]
+                    
+                    if start[0]+1 == end[0]: # end is next to start
+                        print(start, end, 'next')
+                        print(self.graph.get_edge_data(start[-2], end[-2]))
+
+                    else: # there are skipped stops between start and end
+                        print(start, end, 'skip')
+                        print(range(start[0], end[0]))
+
+                        deleting_edge_idx = []
+                        deleting_edges = []
+                        
+                        for k in range(start[0], end[0]):
+                            edge_idx = sz[k][-1]
+                            edge = self.graph.get_edge_data_by_index(edge_idx)
+                            print(k, edge)
+                            deleting_edge_idx.append(edge_idx)
+                            deleting_edges.append(edge)
+                            self.graph.remove_edge_from_index(edge_idx)
+                        
+                        deleted_edges_geom = [shapely.from_wkt(e['geom']) for e in deleting_edges]
+
+                            
+
+
+
+                        '''deleting_edge_idx = [(sz[k][-2], sz for k in range(start[0]+1, end[0])]
+                        print(deleting_edge_idx)
+                        deleted_edges = [self.graph.get_edge_data_by_index(e) for e in deleting_edge_idx if e is not None]
+                        # удаление ребер
+                        for edge in deleting_edge_idx:
+                            if edge is not None:
+                                self.graph.remove_edge_from_index(edge)
+                        # контракция ребер
+                        '''
+                        traveltime = sum([e['traveltime'] for e in deleting_edges])
+                        length = sum([e['length'] for e in deleting_edges])
+                        merged = shapely.ops.linemerge(deleted_edges_geom)
+                        ref = deleting_edges[0]['ref']
+                        trip_id = deleting_edges[0]['trip_id']
+                        geom = merged.wkt
+                        lfrom = deleting_edges[0]['from']
+                        lto = deleting_edges[-1]['to']
+                        #print(lfrom, lto)
+                        leg_name = f'{self.graph[lfrom]['name']}-{self.graph[lto]['name']}'
+                        edict = {'type': self.type,
+                                                                'traveltime': traveltime,
+                                                                'trip_id': trip_id,
+                                                                'ref': ref,
+                                                                'geom': geom,
+                                                                'length': length,
+                                                                'from': lfrom,
+                                                                'to': lto,
+                                                                'leg_name': leg_name}
+                        print('contracted', edict)
+                        self.graph.add_edge(start[-2], end[-2], edict)
+            print('CHECK')
+            for j in range(len(sz_new)-1):
+                start, end = sz_new[j], sz_new[j+1]
+                
+                if self.graph.has_edge(start[-2], end[-2]):
+                    print(self.graph.get_edge_data(start[-2], end[-2])['geom'])
+                else:
+                    print(start[-2], end[-2])
+            break
+
     # Учитывать limited ключи в тэге wheelchair
-    def edge_contractor(self, keep_limited=True, logger=True):
+    def edge_contractor2(self, keep_limited=True, logger=True):
         if logger:
             print(f'Graph, before contraction: |V|={len(self.graph.nodes())}, |E|={len(self.graph.edges())}')
         for trip in self.trips:
+            
             sequence=trip['stop_sequence']
             trip_id=trip['route_id']
+            print(trip_id)
+
             sequence_access_flags=[self.find_access_by_id(s, self.stops) for s in sequence]
             sequence_node_ids=[self.find_idx_by_id(s, self.stops) for s in sequence]
             sequence_edge_ids=[self.find_edge_idx_by_stops(sequence[i], sequence[i+1], trip_id, self.s2s) for i in range(len(sequence)-1)] #Elen = Vlen-1
@@ -67,17 +174,28 @@ class TransitGraph:
             sequence_edge_ids.append(None)
             sequence_zipped=list(zip(sequence, sequence_access_flags, sequence_node_ids, sequence_edge_ids))
             sequence_new=[]
+            if trip['wheelchair'] == 'yes':
+                pass
+            elif trip['wheelchair'] == 'limited' and keep_limited:
+                pass
+            else:
+                print(f'deleting trip {trip_id}: {trip["wheelchair"]} tag')
+                for e in sequence_edge_ids:
+                    if e is not None:
+                        self.graph.remove_edge_from_index(e['edge_idx'])
+                continue
+            
             # find contracted stop sequence
             for i in range(len(sequence_zipped)):
                 s, a, n, e = sequence_zipped[i]
                 # /!\ Допилить логику на кросс-платформенных пересадках: если wheelchair=limited & wheelchair:description=cross-platform, тогда добавить кросс-платформенную пересадку и последующую за ней для смены направления
                 if [s, a, n, e] not in sequence_new:
                     if a==1: # if accessed by wc
-                        sequence_new.append([s, a, n, e])
+                        sequence_new.append((s, a, n, e))
                     elif a==2:
-                        sequence_new.append([s, a, n, e])
-                        sn, an, nn, en = sequence_zipped[i+1]
-                        sequence_new.append([sn, an, nn, en])
+                        sequence_new.append((s, a, n, e))
+                        #sn, an, nn, en = sequence_zipped[i+1]
+                        #sequence_new.append([sn, an, nn, en])
                     else: pass
             if sequence_new!=sequence_zipped: # if contracted stop sequence contains less stops
                 # remove edges
@@ -88,25 +206,35 @@ class TransitGraph:
                 #self.graph.remove_nodes_from(sequence_node_ids)
                 
                 # update geometry of contracted stop sequence and add contracted edges
-                print(sequence_zipped)
-                print(sequence_new)
+                print('zipped', sequence_zipped)
+                print('new', sequence_new)
                 for i in range(len(sequence_new)-1):
                     parent=sequence_new[i]
                     child=sequence_new[i+1]
                     print(parent[0], child[0])
-                    total_geom=[parent[-1]['shape']]
-                    start_index = next(index for index, stop in enumerate(sequence_zipped) if stop[0] == parent)
-                    for j in range(start_index+1, len(sequence_zipped)):
-                        total_geom.append(shapely.from_wkt(sequence_zipped[j][-1]['shape']))
-                        if sequence_zipped[j][0]==child[0]:
+                    #print(parent[-1])
+                    total_geom=[shapely.from_wkt(parent[-1]['shape'])]
+                    #start_index = next(index for index, stop in enumerate(sequence_zipped) if stop[0] == parent)
+                    start_index = None
+                    for index, stop in enumerate(sequence_zipped):
+                        if stop[0] == parent[0]:
+                            start_index = index
                             break
-                    merged_line=shapely.union_all(total_geom)
+                    for j in range(start_index+1, len(sequence_zipped)):
+                        if sequence_zipped[j][-1] is not None:
+                            total_geom.append(shapely.from_wkt(sequence_zipped[j][-1]['shape']))
+                            if sequence_zipped[j][0]==child[0]:
+                                break
+                    if len(total_geom)>1:
+                        merged_line=shapely.union_all(total_geom)
+                    else:
+                        merged_line=total_geom[0]
                     sequence_new[i][-1]['geom']=merged_line.wkt
                     sequence_new[i][-1]['length']=merged_line.length
-                    sequence_new[i][-1]['from']=parent[i]['stop_id']
-                    sequence_new[i][-1]['to']=child[i]['stop_id']
+                    sequence_new[i][-1]['from']=parent[0]
+                    sequence_new[i][-1]['to']=child[0]
 
-                    self.graph.add_edge(parent, child, {'type': self.type,
+                    self.graph.add_edge(self.find_idx_by_id(parent[0], self.stops), self.find_idx_by_id(child[0], self.stops), {'type': self.type,
                                                     'traveltime': self.set_traveltime(float(sequence_new[i][-1]['length']), self.speed),
                                                     'trip_id': sequence_new[i][-1]['trip_id'], 
                                                     'ref': sequence_new[i][-1]['trip_ref'], 
@@ -141,12 +269,12 @@ class TransitGraph:
                     return 0
                 else:
                     if keep_limited:
-                        if stop['wheelchair']=='cross-platform':
+                        if stop['wheelchair']=='cross-platform' or stop['wheelchair']=='limited':
                             return 2
                         else:
                             return 1
                     else:
-                        return 1
+                        return 2
 
 class PedestrianGraphHandler(osmium.SimpleHandler):
     def __init__(self, tags):

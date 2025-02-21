@@ -8,7 +8,7 @@ from geopy.distance import geodesic
 from TransitGraphStatic import EnhTransitGraph
 
 class RaptorRouter:
-    def __init__(self, graph: EnhTransitGraph):
+    def __init__(self, graph: EnhTransitGraph, pedestrian=False):
         """
         Инициализация маршрутизатора
 
@@ -20,6 +20,7 @@ class RaptorRouter:
         #print('stop_ids:', self.stop_ids)
         self.get_trip_ids()
         #print('trip_ids:', self.trip_ids)
+        self.pedestrian = pedestrian
 
     def get_trip_ids(self):
         """Получение уникальных идентификаторов маршрутов"""
@@ -77,23 +78,25 @@ class RaptorRouter:
 
         return available_stops
 
-    def source_all_destinations_isochrones(self, start, max_transfers=1, pedestrian=True, pedestrian_cutoff=5, k_stops=4, bandwidth=0.003):
+    def RAPTOR_source_all_destination_transitlabels(self, start, pedestrian, max_transfers=1, pedestrian_cutoff=5, k_stops=4, bandwidth=0.003):
         """Нахождение достижимых вершин из остановки
         
         :param start: точка начала (lon, lat)
         :param max_transfers: Максимальное число пересадок/итераций
         :param pedestrian_cutoff: Время отсечки пешеходного графа от остановки
 
-        :return: arrival_times: dict, arrival_ntransfers: dict
+        :return: arrival_labels: {arrival, transfers, endpoint T/F, type}
         """
-        self.max_transfers=max_transfers
+        self.max_transfers = max_transfers
             
         arrival_times = defaultdict(lambda: float('inf'))
 
         arrival_ntransfers = defaultdict(lambda: float('inf'))
+
+        arrival_labels = defaultdict(lambda: float('inf'))
         
         if pedestrian==True:
-            start_node_idx=self.enh.get_nearest_node_idx(start)
+            start_node_idx = self.enh.get_nearest_node_idx(start)
         # довести точку старта к остановкам. BFS - для изохроны, A*/Djikstra - для минимума памяти. закинуть в arrival_times
 
         nearest_stops=self.enh.get_kn_stops_node_idx(start, k_stops, bandwidth)
@@ -178,12 +181,22 @@ class RaptorRouter:
                 
                 # Обновляем очередь для следующей итерации
                 queue = deque(next_queue)
-        endpoints = list()
+        dict_sample = {'arrival': None, 'transfers': None, 'endpoint': False, 'type': None}
+        
         for node in arrival_times.keys():
-            out_transit_nodes=[edge for edge in self.graph.out_edges(node) if edge[2]['type']!='pedestrian' and edge[2]['type']!='connector' and edge[2]['type']!='interchange']
-            if len(out_transit_nodes)==0:
-                endpoints.append(node)
-        return dict(arrival_times), dict(arrival_ntransfers), endpoints
+            label = dict_sample.copy()
+            label['arrival'] = arrival_times[node]
+            label['transfers'] = arrival_ntransfers[node]
+
+            out_transit_nodes = [edge for edge in self.graph.out_edges(node) if edge[2]['type']!='pedestrian' and edge[2]['type']!='connector' and edge[2]['type']!='interchange']
+            if len(out_transit_nodes) == 0:
+                label['endpoint'] = True
+
+            label['type']=self.graph[node]['type']
+            arrival_labels[node] = label
+
+        return arrival_labels
+    
     @lru_cache(maxsize=None)  # Кэширование результатов
     def bfs_pedestrian(self, node, cutoff=5):
         """
@@ -219,12 +232,14 @@ class RaptorRouter:
         
         return arrival_times
 
-    def get_gdf(self, arrival_times, arrival_ntransfers):
+    def get_gdf(self, arrival_labels):
         nodes=[]
-        for node in arrival_times.keys():
+        for node in arrival_labels.keys():
             nodedata=self.graph[node]
-            nodedata['arrival']=arrival_times[node]
-            nodedata['transfers']=arrival_ntransfers[node]
+            nodedata['arrival']=arrival_labels[node]['arrival']
+            nodedata['transfers']=arrival_labels[node]['transfers']
+            nodedata['endpoint']=arrival_labels[node]['endpoint']
+            nodedata['raptor_type']=arrival_labels[node]['type']
             nodes.append(nodedata)
         nodes_gdf=gpd.GeoDataFrame(nodes)
         nodes_gdf['geom']=nodes_gdf['geom'].apply(lambda x: shapely.from_wkt(x))
