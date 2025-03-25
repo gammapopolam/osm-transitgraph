@@ -6,6 +6,8 @@ import shapely
 from heapq import heappush, heappop
 from geopy.distance import geodesic
 from TransitGraphStatic import EnhTransitGraph
+import heapq
+from tqdm import tqdm
 
 class RaptorRouter:
     def __init__(self, graph: EnhTransitGraph, pedestrian=False):
@@ -78,7 +80,7 @@ class RaptorRouter:
 
         return available_stops
 
-    def RAPTOR_source_all_destination_transitlabels(self, start, pedestrian, max_transfers=1, pedestrian_cutoff=5, k_stops=4, bandwidth=0.003):
+    def RAPTOR_source_all_destination_transitlabels(self, start, pedestrian, max_transfers=1, pedestrian_cutoff=5, k_stops=4, bandwidth=0.003, wc_access='all'):
         """Нахождение достижимых вершин из остановки
         
         :param start: точка начала (lon, lat)
@@ -95,22 +97,40 @@ class RaptorRouter:
 
         arrival_labels = defaultdict(lambda: float('inf'))
         
-        if pedestrian==True:
-            start_node_idx = self.enh.get_nearest_node_idx(start)
-        # довести точку старта к остановкам. BFS - для изохроны, A*/Djikstra - для минимума памяти. закинуть в arrival_times
+        
 
         nearest_stops=self.enh.get_kn_stops_node_idx(start, k_stops, bandwidth)
 
+        if wc_access == 'all':
+            pass
+        elif wc_access == 'limited': 
+            nearest_stops=[stop_idx for stop_idx in nearest_stops if self.enh.graph[stop_idx]['wc_access'] != 'no']
+        elif wc_access == 'wheelchair':
+            nearest_stops=[stop_idx for stop_idx in nearest_stops if self.enh.graph[stop_idx]['wc_access'] != 'no' and self.enh.graph[stop_idx]['wc_access'] != 'limited']
+
+        
+        if pedestrian==True:
+            start_node_idx = self.enh.get_nearest_node_idx(start)
+        # довести точку старта к остановкам. BFS - для изохроны, A*/Djikstra - для минимума памяти. закинуть в arrival_times
         #TODO: поиск конечных вершин - вершин, из которых нет выходящих ребер != pedestrian, connector, interchange
         # уже после нахождения меток в arrival_times
         for stop in nearest_stops:
             self.start_stop=stop
-            arrival_times[self.start_stop] = 0  # Время старта
+            # Начальная и конечная вершины
+            if pedestrian:
+                start_node = start_node_idx
+                target_node = self.start_stop
+                weight_fn = lambda edge: edge["traveltime"]
+            # Запуск A*
+                path, cost = self.a_star(start_node, target_node, weight_fn, self.heuristic)
+            else:
+                cost = 0
+            arrival_times[self.start_stop] = cost  # Время старта
             arrival_ntransfers[self.start_stop] = 0
             #print(f'Calculating {self.start_stop} with {max_transfers} iters, {pedestrian_cutoff} min cutoff')
 
             queue = deque()
-            queue.append((self.start_stop, 0))
+            queue.append((self.start_stop, cost))
 
             for i in range(self.max_transfers + 1):
                 next_queue = set()
@@ -130,7 +150,21 @@ class RaptorRouter:
                             for available_stop, travel_time in available_stops:
                                 total_time = current_time + travel_time
 
-                                if total_time < arrival_times[available_stop]:
+                                wc_label=self.enh.graph[available_stop]['wc_access']
+                                if wc_access == 'all':
+                                    pass
+                                elif wc_access == 'limited': 
+                                    if wc_label != 'no':
+                                        pass
+                                    else:
+                                        break
+                                elif wc_access == 'wheelchair':
+                                    if wc_label != 'no' and wc_label != 'limited':
+                                        pass
+                                    else:
+                                        break
+                                if total_time < arrival_times[available_stop] and i < arrival_ntransfers[available_stop]:
+
                                     arrival_times[available_stop] = total_time
                                     arrival_ntransfers[available_stop] = i
                                     # Добавляем остановку в очередь для следующей итерации
@@ -140,10 +174,24 @@ class RaptorRouter:
                                         edata = edge[2]
                                         if edata['type']=='interchange':
                                             transferred = edge[1]
-                                            if total_time+edata['traveltime'] < arrival_times[transferred]:
+                                            wc_label=self.enh.graph[transferred]['wc_access']
+                                            if wc_access == 'all':
+                                                pass
+                                            elif wc_access == 'limited': 
+                                                if wc_label != 'no':
+                                                    pass
+                                                else:
+                                                    break
+                                            elif wc_access == 'wheelchair':
+                                                if wc_label != 'no' and wc_label != 'limited':
+                                                    pass
+                                                else:
+                                                    break
+                                            if total_time+edata['traveltime'] < arrival_times[transferred] and i < arrival_ntransfers[transferred]:
                                                 arrival_times[transferred] = total_time+edata['traveltime']
                                                 arrival_ntransfers[transferred] = i
                                                 next_queue.add((transferred, total_time+edata['traveltime']))
+                                
 
                     if pedestrian==True:
                         # Пешеходное плечо от этой остановки
@@ -196,6 +244,47 @@ class RaptorRouter:
             arrival_labels[node] = label
 
         return arrival_labels
+    # Эвристическая функция (например, минимальное возможное время до цели)
+    def heuristic(self, node, goal):
+        """
+        Эвристическая функция для A* (например, расстояние между вершинами).
+
+        :param node: Текущая вершина
+        :param goal: Целевая вершина
+        :return: Оценка расстояния
+        """
+        # Здесь можно использовать географическое расстояние или другую метрику
+        node_geom=shapely.from_wkt(self.graph[node]['geom'])
+        goal_geom=shapely.from_wkt(self.graph[goal]['geom'])
+        distance=geodesic((node_geom.y, node_geom.x), (goal_geom.y, goal_geom.x)).kilometers
+        return distance
+
+    # Реализация алгоритма A*
+    def a_star(self, start, target, weight_fn, heuristic):
+        # Приоритетная очередь: (приоритет, текущая вершина, пройденный путь, стоимость пути)
+        queue = [(0, start, [], 0)]
+        visited = set()
+
+        while queue:
+            _, current, path, cost = heapq.heappop(queue)
+
+            if current == target:
+                return path + [current], cost
+
+            if current in visited:
+                continue
+            visited.add(current)
+
+            for edge in self.enh.graph.incident_edges(current):
+                neighbor = edge[1] if edge[0] == current else edge[0]
+                if neighbor not in visited:
+                    edge_data = self.enh.graph.get_edge_data(edge[0], edge[1])
+                    new_cost = cost + weight_fn(edge_data)
+                    priority = new_cost + heuristic(neighbor, target)
+                    heapq.heappush(queue, (priority, neighbor, path + [current], new_cost))
+
+        return None, float("inf")  # Если путь не найден
+
     
     @lru_cache(maxsize=None)  # Кэширование результатов
     def bfs_pedestrian(self, node, cutoff=5):
@@ -460,4 +549,115 @@ def test3():
         out_edges=[e for e in enh.graph.out_edges(stop) if e[2]['type']!='pedestrian' and e[2]['type']!='connector']
         print(out_edges)
         print([e[2]['ref'] for e in out_edges])
-#test3()
+def test4():
+    from TransitGraphStatic import TransitGraph, EnhTransitGraph, PedestrianGraph
+
+    tram=TransitGraph(trips=r"D:\osm2gtfs\ru_spe_osmgrabber\tram_trips.json", stops=r"D:\osm2gtfs\ru_spe_osmgrabber\tram_stops.json", s2s=r"D:\osm2gtfs\ru_spe_osmgrabber\tram_s2s.json", speed=24, type='tram', wc_mode=False, keep_limited=True)
+    print('tram', len(tram.graph.nodes()), len(tram.graph.edges()))
+
+    #tram_limited=TransitGraph(trips=r"D:\osm2gtfs\ru_spe_osmgrabber\tram_trips.json", stops=r"D:\osm2gtfs\ru_spe_osmgrabber\tram_stops.json", s2s=r"D:\osm2gtfs\ru_spe_osmgrabber\tram_s2s.json", speed=24, type='tram', wc_mode=True, keep_limited=True)
+    #print('tram_limited', len(tram_limited.graph.nodes()), len(tram_limited.graph.edges()))
+
+    bus=TransitGraph(trips=r"D:\osm2gtfs\ru_spe_osmgrabber\bus_trips.json", stops=r"D:\osm2gtfs\ru_spe_osmgrabber\bus_stops.json", s2s=r"D:\osm2gtfs\ru_spe_osmgrabber\bus_s2s.json", speed=18, type='bus')
+    print('bus', len(bus.graph.nodes()), len(bus.graph.edges()))
+
+    subway=TransitGraph(trips=r"D:\osm2gtfs\ru_spe_osmgrabber\subway_trips.json", stops=r"D:\osm2gtfs\ru_spe_osmgrabber\subway_stops.json", s2s=r"D:\osm2gtfs\ru_spe_osmgrabber\subway_s2s.json", speed=31, type='subway')
+    print('subway', len(subway.graph.nodes()), len(subway.graph.edges()))
+
+    highway_tags = [
+        "primary",
+        "secondary",
+        "tertiary",
+        "unclassified",
+        "residential",
+        "service",
+        "primary_link",
+        "secondary_link",
+        "tertiary_link",
+        "living_street",
+        "pedestrian",
+        "footway",
+        "bridleway",
+        "steps",
+        "path",
+        "crossing",
+    ]
+    #pedestrian=PedestrianGraph(pbf=r'd:\osm2gtfs\ru_spe_osmgrabber\saint_petersburg-filter.osm.pbf', tags=highway_tags, walking=3)
+    #print('pedestrian', len(pedestrian.graph.nodes()), len(pedestrian.graph.edges()))
+
+    enh=EnhTransitGraph([bus.graph, tram.graph, subway.graph], walking=2)
+    print('init enhanced')
+    enh.init_interchanges(k=4, d=0.003)
+
+    #enh_limited=EnhTransitGraph([bus.graph, tram_limited.graph], walking=2)
+    #print('init enhanced limited')
+    #enh_limited.init_interchanges(k=4, d=0.003)
+
+    zones = gpd.read_file('spe_tests.gpkg', layer='spe_zones')
+    zones['zone_id']=zones.index
+    print('Calculating raptor router for each zone')
+    raptor = RaptorRouter(enh)
+    res_all = []
+    res_wh = []
+    k = 4
+
+    for _, z in tqdm(zones.iterrows(), total=zones.shape[0]):
+        import math
+
+        # Создаем полигон (пример)
+        polygon = z.geometry
+
+        # 1. Находим вершины полигона
+        vertices = list(polygon.exterior.coords)
+
+        # 2. Находим центр полигона (центр масс)
+        center = polygon.centroid
+
+        # 3. Находим радиус описанной окружности
+        radius = max(math.hypot(center.x - x, center.y - y) for x, y in vertices)
+        bw = radius + 0.001
+        zone_cnt = (z.geometry.centroid.y, z.geometry.centroid.x)
+        arrival_labels_all = raptor.RAPTOR_source_all_destination_transitlabels(zone_cnt,
+                                                                        max_transfers=k, 
+                                                                        pedestrian=False, 
+                                                                        pedestrian_cutoff=15, 
+                                                                        k_stops=6, bandwidth=bw, wc_access='all')
+        arrival_labels_wh = raptor.RAPTOR_source_all_destination_transitlabels(zone_cnt,
+                                                                        max_transfers=k, 
+                                                                        pedestrian=False, 
+                                                                        pedestrian_cutoff=15, 
+                                                                        k_stops=6, bandwidth=bw, wc_access='wheelchair')
+
+        #self.topodiam_dict[z.zone_id] = max(arrival_times.values())
+        for node in arrival_labels_all.keys():
+            ndata = enh.graph[node]
+            nodedata=ndata.copy()
+            nodedata['arrival'] = arrival_labels_all[node]['arrival']
+            nodedata['transfers']=arrival_labels_all[node]['transfers']
+            nodedata['endpoint']=arrival_labels_all[node]['endpoint']
+            nodedata['raptor_type']=arrival_labels_all[node]['type']
+            nodedata['zone_id'] = z.zone_id
+            res_all.append(nodedata)
+
+        for node in arrival_labels_wh.keys():
+            ndata = enh.graph[node]
+            nodedata=ndata.copy()
+            nodedata['arrival'] = arrival_labels_wh[node]['arrival']
+            nodedata['transfers']=arrival_labels_wh[node]['transfers']
+            nodedata['endpoint']=arrival_labels_wh[node]['endpoint']
+            nodedata['raptor_type']=arrival_labels_wh[node]['type']
+            nodedata['zone_id'] = z.zone_id
+            res_wh.append(nodedata)
+    if len(res_all)>0 and len(res_wh)>0:
+        res_all_gdf = gpd.GeoDataFrame(res_all)
+        res_all_gdf['geom']=res_all_gdf['geom'].apply(lambda x: shapely.from_wkt(x))
+        res_all_gdf.set_geometry('geom', crs='EPSG:4326', inplace=True)
+        print(f'Saving all with {k} int')
+        res_all_gdf.to_file('spe_tests.gpkg', layer=f'test_int{k}_all')
+
+        res_wh_gdf = gpd.GeoDataFrame(res_wh)
+        res_wh_gdf['geom']=res_wh_gdf['geom'].apply(lambda x: shapely.from_wkt(x))
+        res_wh_gdf.set_geometry('geom', crs='EPSG:4326', inplace=True)
+        print(f'Saving wh with {k} int')
+        res_wh_gdf.to_file('spe_tests.gpkg', layer=f'test_int{k}_wh')
+#test4()

@@ -7,3 +7,11 @@ ped_graph*
 kja_tests*
 spe_*
 raptor_style.qml
+kja/*
+msc/*
+old/*
+operativka/*
+perm/*
+spe/*
+overall_A.qml
+*.png
