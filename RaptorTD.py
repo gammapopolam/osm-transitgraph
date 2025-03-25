@@ -69,6 +69,7 @@ class RaptorTDRouter:
                 while queue:
                     current_stop, enroute_time = queue.popleft()
                     earliest_available_stops = self.get_earliest_available_stops(current_stop, enroute_time, self.mode, transfer_time_limit)
+                    print(earliest_available_stops)
                     for available_stop, earliest_arrival in earliest_available_stops:
                         if self.is_accessible(available_stop):
                             if earliest_arrival < arrival_data[available_stop][0] and i < arrival_data[available_stop][1]:
