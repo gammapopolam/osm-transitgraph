@@ -10,116 +10,91 @@ from sklearn.cluster import KMeans
 pd.options.mode.chained_assignment = None
 
 class DailyAccessibilityEvaluator:
-    def __init__(self, zones: gpd.GeoDataFrame, raptor_all: gpd.GeoDataFrame, raptor_restr: gpd.GeoDataFrame, restr_type='wh', timemarks=list(range(480, 480+900+60, 60)), epsg=32636, lr_sample='perm_core'):
+    def __init__(self, zones: gpd.GeoDataFrame, raptor_all: gpd.GeoDataFrame, raptor_restr: gpd.GeoDataFrame, restr_type='wh', n_transfers=3, timemarks=list(range(480, 480+900+60, 60)), epsg=32636, lr_sample='perm_core'):
         self.zones_values = zones
-
+        self.n_transfers=n_transfers
+        self.epsg=epsg
         self.restr_type=restr_type
-        
+        evals={}
         for time in timemarks:
             print(time)
-            raptor_all_f=raptor_all.loc[raptor_all['start']==time]
-            od_all = self.get_od_matrix(raptor_all_f, restr_type='all', time=time, epsg=epsg)
-            od_all.to_csv(f'{lr_sample}_od_all_at_{time}.csv')
 
-            raptor_restr_f=raptor_restr.loc[raptor_restr['start']==time]
-            od_restr = self.get_od_matrix(raptor_restr_f, restr_type=restr_type, time=time, epsg=epsg)
-            od_restr.to_csv(f'{lr_sample}_od_{restr_type}_at_{time}.csv')
+            evals[time]=[]
+            raptor_all_time=raptor_all.loc[raptor_all['start']==time]
+            evaller_all=AccessibilityEvaluator(raptor_all_time, zones.copy(), 'all')
 
-            self.get_agg_od_diff(od_all, od_restr, time, restr_type=restr_type)
+            raptor_restr_time=raptor_restr.loc[raptor_restr['start']==time]
+            evaller_restr=AccessibilityEvaluator(raptor_restr_time, zones.copy(), self.restr_type)
+            
+            evaller_all.get_spatial_bandwidth(epsg=epsg)
+            zones_all=evaller_all.zones.copy()
 
+            evaller_restr.get_spatial_bandwidth(epsg=epsg)
+            zones_restr=evaller_restr.zones.copy()
 
-    def get_od_matrix(self, raptor, time, restr_type='all', epsg=32636):
-        raptor.to_crs(epsg=epsg, inplace=True)
-        zones = self.zones_values.copy().to_crs(epsg=epsg)
-        zones['buffered_geometry'] = zones.geometry.buffer(100)
-        zones = gpd.GeoDataFrame(zones, geometry='buffered_geometry', crs=zones.crs)
+            od_all = evaller_all.get_od_matrix(epsg=epsg)
+            od_restr = evaller_restr.get_od_matrix(epsg=epsg)
 
-        od_list=[]
-        od_sample={'from': None, 'to': None, f'departure_{restr_type}': time, f'arrival_{restr_type}': None, f'traveltime_{restr_type}': None, f'transfers_{restr_type}': None}
-
-        for _, from_z in tqdm(zones.copy().iterrows(), total=zones.shape[0]):
-            from_zone_id=from_z['zone_id']
-            raptor_z = raptor.loc[raptor['zone_id'] == from_zone_id]
-            for _, to_z in zones.copy().iterrows():
-                to_zone_id=to_z['zone_id']
-                raptor_z2 = raptor_z.loc[raptor_z.within(to_z.geometry)]
-                #print(raptor_z2)
-                if len(raptor_z2)>0:
-                    #min_transfer=raptor_z2['transfers'].min()
-                    #candidates=raptor_z2[raptor_z2['transfers']==min_transfer]
-                    best=raptor_z2.loc[raptor_z2['arrival'].idxmin()]
-                    # Самая ранняя метка среди всех вместо самой ранней метки при минимуме пересадок
-                    od=od_sample.copy()
-                    od['from']=from_zone_id
-                    od['to']=to_zone_id
-                    od[f'arrival_{restr_type}']=best['arrival']
-                    od[f'transfers_{restr_type}']=best['transfers']
-                    od[f'traveltime_{restr_type}']=best['arrival']-time
-                else:
-                    od=od_sample.copy()
-                    od['from']=from_zone_id
-                    od['to']=to_zone_id
-                od_list.append(od)
+            ga=GeneralAccessibilityEvaluator(zones_all, zones_restr, restr_type=self.restr_type, time=time)
+            ga.measure_A()
+            ga.measure_Traveltime(od_all, od_restr, subtract=True, plot=True)
+            ga.plot_distribution()
+            zones_values_at_time=ga.zones_values.copy()
+            evals[time]=zones_values_at_time
+        self.evals=evals
+        #return self.evals    
+    def merge_daily_accessibility(self, evals):
+        """
+        Объединяет словарь дневных расчетов доступности в единый GeoDataFrame, добавляя временные суффиксы к колонкам.
         
-        od_matrix=pd.DataFrame(od_list)
-        return od_matrix
-    def get_agg_od_diff(self, od_all: pd.DataFrame, od_restr: pd.DataFrame, time=480, restr_type='wh'):
+        :param daily_results: словарь {время: GeoDataFrame}
+        :return: объединенный GeoDataFrame с показателями по всем временам
+        """
+        merged_gdf = None
         
-        # 1. Агрегация достижимых и недостижимых пар для каждой матрицы
-        # Для od_all
-        reach_all = od_all.groupby('from').apply(lambda x: x['arrival_all'].notna().sum()).reset_index(name=f'reach_all_at_{time}')
-        unreach_all = od_all.groupby('from').apply(lambda x: x['arrival_all'].isna().sum()).reset_index(name=f'unreach_all_at_{time}')
+        for time_key, gdf in evals.items():
+            gdf = gdf.copy()
+            gdf = gdf.add_suffix(f"_{time_key}")  # Добавляем суффикс ко всем колонкам
+            gdf = gdf.rename(columns={f"zone_id_{time_key}": "zone_id", f"geometry_{time_key}": "geometry"})  # Оставляем идентификаторы без изменений
+            
+            if merged_gdf is None:
+                merged_gdf = gdf
+            else:
+                merged_gdf = merged_gdf.merge(gdf, on=["zone_id", "geometry"], how="outer")  # Объединение по зоне
+        
+        return merged_gdf
+    def calculate_variability(gdf):
+        metrics = {
+            'A0_delta': [col for col in gdf.columns if 'A0_delta' in col],
+            'A1_delta': [col for col in gdf.columns if 'A1_delta' in col],
+            'A2_delta': [col for col in gdf.columns if 'A2_delta' in col],
+            'A3_delta': [col for col in gdf.columns if 'A3_delta' in col],
+            'A': [col for col in gdf.columns if 'A' in col and 'delta' not in col and 'Aw' not in col],
+            'A_norm': [col for col in gdf.columns if 'A_norm' in col],
+            'Aw': [col for col in gdf.columns if 'Aw' in col],
+            'Aw_norm': [col for col in gdf.columns if 'Aw_norm' in col],
+            'mean_delta_time': [col for col in gdf.columns if 'mean_delta_time' in col],
+            'mean_delta_transfers': [col for col in gdf.columns if 'mean_delta_transfers' in col]
+        }
 
-        # Для od_restr
-        reach_restr = od_restr.groupby('from').apply(lambda x: x[f'arrival_{restr_type}'].notna().sum()).reset_index(name=f'reach_{restr_type}_at_{time}')
-        unreach_restr = od_restr.groupby('from').apply(lambda x: x[f'arrival_{restr_type}'].isna().sum()).reset_index(name=f'unreach_{restr_type}_at_{time}')
+        new_columns = []
+        
+        for key, cols in metrics.items():
+            if cols:  # Проверяем, есть ли такие колонки
+                gdf[f'{key}_mean'] = gdf[cols].mean(axis=1)
+                gdf[f'{key}_std'] = gdf[cols].std(axis=1)
+                gdf[f'{key}_var'] = gdf[cols].var(axis=1)
+                gdf[f'{key}_cv'] = gdf[f'{key}_std'] / gdf[f'{key}_mean']
+                
+                new_columns.extend([f'{key}_mean', f'{key}_std', f'{key}_var', f'{key}_cv'])
+        new_columns.append('geometry')
+        return gdf[new_columns]
 
-        # 2. Фильтрация пар, достижимых в обоих режимах
-        # Объединяем матрицы по парам (from, to)
-        df = pd.merge(od_all, od_restr, on=['from', 'to'])
+            
 
-        # Фильтруем только те пары, где arrival и transfers не NaN в обеих матрицах
-        df_filtered = df.dropna(subset=['arrival_all', 'transfers_all', f'arrival_{restr_type}', f'transfers_{restr_type}'])
 
-        # 3. Расчет разницы для достижимых пар
-        df_filtered['delta_time'] = (df_filtered[f'traveltime_{restr_type}'] - df_filtered['traveltime_all']).abs()
-        df_filtered['delta_transfers'] = (df_filtered[f'transfers_{restr_type}'] - df_filtered['transfers_all']).abs() # РАЗНИЦА В КОЛИЧЕСТВЕ ПЕРЕСАДОК!!!
 
-        # Группируем по зоне from и вычисляем средние значения
-        agg_od_diff = df_filtered.groupby('from').agg({
-            'delta_time': 'mean',
-            'delta_transfers': 'mean'
-        }).reset_index()
 
-        # 4. Сбор всех данных в self.zones_values
-        # Объединяем результаты с self.zones_values, указывая явно колонки для merge
-        # Удаляем колонку 'from' из промежуточных DataFrame, чтобы избежать дублирования
-        reach_all = reach_all.rename(columns={'from': 'zone_id'})
-        unreach_all = unreach_all.rename(columns={'from': 'zone_id'})
-        reach_restr = reach_restr.rename(columns={'from': 'zone_id'})
-        unreach_restr = unreach_restr.rename(columns={'from': 'zone_id'})
-        agg_od_diff = agg_od_diff.rename(columns={'from': 'zone_id'})
-
-        # Объединяем все данные в self.zones_values
-        self.zones_values = self.zones_values.merge(reach_all, on='zone_id', how='left')
-        self.zones_values = self.zones_values.merge(unreach_all, on='zone_id', how='left')
-        self.zones_values = self.zones_values.merge(reach_restr, on='zone_id', how='left')
-        self.zones_values = self.zones_values.merge(unreach_restr, on='zone_id', how='left')
-        self.zones_values = self.zones_values.merge(agg_od_diff, on='zone_id', how='left')
-
-        # Заполняем пропущенные значения нулями
-        self.zones_values[f'reach_all_at_{time}'] = self.zones_values[f'reach_all_at_{time}'].fillna(0)
-        self.zones_values[f'unreach_all_at_{time}'] = self.zones_values[f'unreach_all_at_{time}'].fillna(0)
-        self.zones_values[f'reach_{restr_type}_at_{time}'] = self.zones_values[f'reach_{restr_type}_at_{time}'].fillna(0)
-        self.zones_values[f'unreach_{restr_type}_at_{time}'] = self.zones_values[f'unreach_{restr_type}_at_{time}'].fillna(0)
-        self.zones_values['delta_time'] = self.zones_values['delta_time'].fillna(0)
-        self.zones_values['delta_transfers'] = self.zones_values['delta_transfers'].fillna(0)
-
-        # Переименовываем колонки для удобства
-        self.zones_values.rename(columns={
-            'delta_time': f'mean_delta_time_at_{time}',
-            'delta_transfers': f'mean_delta_transfers_at_{time}'
-        }, inplace=True)
 class AccessibilityEvaluator:
     def __init__(self, raptor: gpd.GeoDataFrame, zones: gpd.GeoDataFrame, type='all', epsg=32636):
         self.raptor = raptor
@@ -193,7 +168,7 @@ class AccessibilityEvaluator:
         od_list=[]
         od_sample={'from': None, 'to': None, 'arrival': None, 'transfers': None}
 
-        for _, from_z in tqdm(zones.copy().iterrows(), total=zones.shape[0]):
+        for _, from_z in zones.copy().iterrows():
             from_zone_id=from_z['zone_id']
             raptor_z = raptor.loc[raptor['zone_id'] == from_zone_id]
             for _, to_z in zones.copy().iterrows():
@@ -253,7 +228,7 @@ class AccessibilityEvaluator:
         # get A0, A1, A2, A3, A4 automatically
         for k in range(0, self.n_transfers+1):
             column_name = f'A{k}'
-            print(f'Evaluating {column_name}')
+            #print(f'Evaluating {column_name}')
             self.zones[column_name] = 0.0
 
             raptor_k = self.raptor[self.raptor['transfers'] <= k]
@@ -263,7 +238,7 @@ class AccessibilityEvaluator:
             zones = gpd.GeoDataFrame(zones, geometry='buffered_geometry', crs=zones.crs)
 
             raptor_k.to_crs(epsg=epsg, inplace=True)
-            for _, v in tqdm(zones.iterrows(), total=zones.shape[0]):
+            for _, v in zones.iterrows():
                 zone_id = v['zone_id']
                 raptor_z = raptor_k.loc[raptor_k['zone_id'] == zone_id]
 
@@ -280,7 +255,7 @@ class AccessibilityEvaluator:
                     #value = len(zones_accessible)/len(zones)
                     self.zones.at[_, column_name] = value
                 else: pass
-        print('Evaluating spatial bandwidth complete')
+        #print('Evaluating spatial bandwidth complete')
 
 
 class GeneralAccessibilityEvaluator:
