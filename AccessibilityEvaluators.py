@@ -66,16 +66,21 @@ class DailyAccessibilityEvaluator:
                 merged_gdf = merged_gdf.merge(gdf, on=["zone_id", "geometry"], how="outer")  # Объединение по зоне
         
         return merged_gdf
+
     def calculate_variability(self, gdf):
         metrics = {
             'A0_delta': [col for col in gdf.columns if 'A0_delta' in col],
             'A1_delta': [col for col in gdf.columns if 'A1_delta' in col],
             'A2_delta': [col for col in gdf.columns if 'A2_delta' in col],
             'A3_delta': [col for col in gdf.columns if 'A3_delta' in col],
-            'A': [col for col in gdf.columns if 'A' in col and 'delta' not in col and 'Aw' not in col],
-            'A_norm': [col for col in gdf.columns if 'A_norm' in col],
-            'Aw': [col for col in gdf.columns if 'Aw' in col],
-            'Aw_norm': [col for col in gdf.columns if 'Aw_norm' in col],
+            'A_all': [col for col in gdf.columns if 'A_all' in col],
+            'A_wh': [col for col in gdf.columns if 'A_wh' in col],
+            'A_gap': [col for col in gdf.columns if 'A_gap' in col and 'norm' not in col],
+            'A_gap_norm': [col for col in gdf.columns if 'A_gap_norm' in col],
+            'Aw_all': [col for col in gdf.columns if 'Aw_all' in col],
+            'Aw_wh': [col for col in gdf.columns if 'Aw_wh' in col],
+            'Aw_gap': [col for col in gdf.columns if 'Aw_gap' in col and 'norm' not in col],
+            'Aw_gap_norm': [col for col in gdf.columns if 'Aw_gap_norm' in col],
             'mean_delta_time': [col for col in gdf.columns if 'mean_delta_time' in col],
             'mean_delta_transfers': [col for col in gdf.columns if 'mean_delta_transfers' in col]
         }
@@ -318,14 +323,19 @@ class GeneralAccessibilityEvaluator:
         self.zones_values['A2_delta']=self.zones_values['A2_all']-self.zones_values[f'A2_{self.restr_type}']
         self.zones_values['A3_delta']=self.zones_values['A3_all']-self.zones_values[f'A3_{self.restr_type}']
 
+        self.zones_values[f'A_all']=0.25*self.zones_values['A0_all']+0.25*self.zones_values['A1_all']+0.25*self.zones_values['A2_all']+0.25*self.zones_values['A3_all']
+        self.zones_values[f'A_{self.restr_type}']=0.25*self.zones_values[f'A0_{self.restr_type}']+0.25*self.zones_values[f'A1_{self.restr_type}']+0.25*self.zones_values[f'A2_{self.restr_type}']+0.25*self.zones_values[f'A3_{self.restr_type}']
 
-        self.zones_values['Aw']=0.4*self.zones_values['A0_delta']+0.3*self.zones_values['A1_delta']+0.2*self.zones_values['A2_delta']+0.1*self.zones_values['A3_delta']
+        self.zones_values['A_gap']=self.zones_values[f'A_all']-self.zones_values[f'A_{self.restr_type}']
+
+        self.zones_values[f'Aw_all']=0.4*self.zones_values['A0_all']+0.3*self.zones_values['A1_all']+0.2*self.zones_values['A2_all']+0.1*self.zones_values['A3_all']
+        self.zones_values[f'Aw_{self.restr_type}']=0.4*self.zones_values[f'A0_{self.restr_type}']+0.3*self.zones_values[f'A1_{self.restr_type}']+0.2*self.zones_values[f'A2_{self.restr_type}']+0.1*self.zones_values[f'A3_{self.restr_type}']
+
+        self.zones_values['Aw_gap']=self.zones_values[f'Aw_all']-self.zones_values[f'Aw_{self.restr_type}']
         def normalize(series):
             return (series - series.min()) / (series.max() - series.min())
-        self.zones_values['Aw_norm']=normalize(self.zones_values['Aw'])
-
-        self.zones_values['A']=0.25*self.zones_values['A0_delta']+0.25*self.zones_values['A1_delta']+0.25*self.zones_values['A2_delta']+0.25*self.zones_values['A3_delta']
-        self.zones_values['A_norm']=normalize(self.zones_values['A'])
+        self.zones_values['A_gap_norm']=normalize(self.zones_values['A_gap'])
+        self.zones_values['Aw_gap_norm']=normalize(self.zones_values['Aw_gap'])
 
     def plot_accessibility(self):
         # Создаём фигуру и оси
