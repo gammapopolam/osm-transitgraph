@@ -6,6 +6,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import AgglomerativeClustering
+import scipy.cluster.hierarchy as sch
 
 pd.options.mode.chained_assignment = None
 
@@ -63,7 +66,7 @@ class DailyAccessibilityEvaluator:
                 merged_gdf = merged_gdf.merge(gdf, on=["zone_id", "geometry"], how="outer")  # Объединение по зоне
         
         return merged_gdf
-    def calculate_variability(gdf):
+    def calculate_variability(self, gdf):
         metrics = {
             'A0_delta': [col for col in gdf.columns if 'A0_delta' in col],
             'A1_delta': [col for col in gdf.columns if 'A1_delta' in col],
@@ -89,6 +92,39 @@ class DailyAccessibilityEvaluator:
                 new_columns.extend([f'{key}_mean', f'{key}_std', f'{key}_var', f'{key}_cv'])
         new_columns.append('geometry')
         return gdf[new_columns]
+    def hierarchical_clustering(self, gdf, n_clusters=3, plot_dendrogram=False):
+        """
+        Выполняет иерархическую кластеризацию зон по доступности.
+        - n_clusters: число кластеров (по умолчанию 3)
+        - plot_dendrogram: если True, строит дендрограмму
+        """
+        if gdf is None:
+            raise ValueError("Объединенный GeoDataFrame не создан. Сначала вызовите merge_daily_accessibility().")
+        
+        # Выбираем только числовые показатели для кластеризации
+        feature_cols = [col for col in gdf.columns if '_mean' in col or '_var' in col or '_cv' in col]
+        data = gdf[feature_cols].dropna()
+        
+        # Стандартизация данных
+        scaler = StandardScaler()
+        scaled_data = scaler.fit_transform(data)
+        
+        # Построение дендрограммы для выбора оптимального числа кластеров
+        if plot_dendrogram:
+            plt.figure(figsize=(10, 5))
+            sch.dendrogram(sch.linkage(scaled_data, method='ward'))
+            plt.title("Дендрограмма иерархической кластеризации")
+            plt.xlabel("Зоны")
+            plt.ylabel("Евклидово расстояние")
+            plt.show()
+        
+        # Кластеризация с агломеративным методом
+        clustering = AgglomerativeClustering(n_clusters=n_clusters, linkage='ward')
+        clusters = clustering.fit_predict(scaled_data)
+        
+        # Добавляем кластеры в GeoDataFrame
+        gdf.loc[data.index, "cluster"] = clusters
+        return gdf
 
             
 
