@@ -1,6 +1,5 @@
 operativka.ipynb
 pedestrian_graph_tests.ipynb
-__pycache__/*
 ped_graph.gpkg
 critical*
 ped_graph*
@@ -15,3 +14,5 @@ perm/*
 spe/*
 overall_A.qml
 *.png
+!kja/kja_tdgraph_evals.ipynb
+!perm/perm_tdgraph_evals.ipynb
