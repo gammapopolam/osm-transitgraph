@@ -317,8 +317,19 @@ class EnhTransitGraph:
                 # Добавление рёбер пересадки (в обе стороны)
                 self.graph.add_edge(stop_node_id, nearest_pedestrian_node_id, {"type": "connector", 'traveltime': 0.1, 'from': stop_node_id, 'to': nearest_pedestrian_node_id})
                 self.graph.add_edge(nearest_pedestrian_node_id, stop_node_id, {"type": "connector", 'traveltime': 0.1, 'from': nearest_pedestrian_node_id, 'to': stop_node_id})
+    def init_simple_interchanges(self, k=4, d=0.009):
 
-    def init_interchanges(self, k=4, d=0.003):
+        for node in self.graph.node_indices():
+            lat, lon = self.graph[node]['lat'], self.graph[node]['lon']
+            nearest_stops = self.get_kn_stops_node_idx((lat, lon), k, d)
+            for stop in nearest_stops:
+                if node != stop:
+                    self.graph.add_edge(node, stop, {'type': 'interchange', 'traveltime': 5, 'from': node, 'to': stop})
+                    if self.graph[node]['type']!='bus' and self.graph[stop]['type']!='bus':
+                        print(f'{self.graph[node]['type']} {self.graph[node]['name']}-> {self.graph[stop]['type']} {self.graph[stop]['name']}')
+        print(f'initialized interchanges')
+
+    def init_interchanges(self, k=4, d=0.00):
         """ Инициализация ребер пересадки в объединенном транспортном графе. 
         Строит ребра `type=interchange` между видами транспорта (subway, commuter, tram, bus) до 2k раз
 
@@ -341,8 +352,8 @@ class EnhTransitGraph:
                     #print(f'init tram {tram_node}, {stop}')
                     #print(f'init tram {self.graph[tram_node]['name']}', end=' ')
                     #print(f'-- {self.graph[stop]['name']}')
-                    self.graph.add_edge(tram_node, stop, {'type': 'interchange', 'traveltime': 1, 'from': tram_node, 'to': stop})
-                    self.graph.add_edge(stop, tram_node, {'type': 'interchange', 'traveltime': 1, 'from': stop, 'to': tram_node})
+                    self.graph.add_edge(tram_node, stop, {'type': 'interchange', 'traveltime': 4, 'from': tram_node, 'to': stop})
+                    self.graph.add_edge(stop, tram_node, {'type': 'interchange', 'traveltime': 4, 'from': stop, 'to': tram_node})
         if len(subway_nodes)>0:
             for sw_node in subway_nodes:
                 swlon, swlat = shapely.from_wkt(self.graph[sw_node]['geom']).xy
@@ -358,11 +369,11 @@ class EnhTransitGraph:
                         self.graph.add_edge(stop, sw_node, {'type': 'interchange', 'traveltime': 7, 'from': stop, 'to': sw_node})
         if len(commuter_nodes)>0:
             for c_node in commuter_nodes:
-                clon, clat = shapely.from_wkt(self.graph[c_node]['geom'])
+                clon, clat = shapely.from_wkt(self.graph[c_node]['geom']).xy
                 c_point=(clat[0], clon[0])
                 nearest_stops = self.get_kn_stops_node_idx(c_point, k, d)
                 for stop in nearest_stops:
-                    #print(f'init commuter {self.graph[c_node]['name']}--{self.graph[stop]['name']}')
+                    print(f'init commuter {self.graph[c_node]['name']}--{self.graph[stop]['name']}')
                     self.graph.add_edge(c_node, stop, {'type': 'interchange', 'traveltime': 10, 'from': c_node, 'to': stop})
                     self.graph.add_edge(stop, c_node, {'type': 'interchange', 'traveltime': 10, 'from': stop, 'to': c_node})
         if len(bus_nodes)>0: 

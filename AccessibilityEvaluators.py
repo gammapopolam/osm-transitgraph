@@ -209,7 +209,7 @@ class AccessibilityEvaluator:
         od_list=[]
         od_sample={'from': None, 'to': None, 'arrival': None, 'transfers': None}
 
-        for _, from_z in zones.copy().iterrows():
+        for _, from_z in tqdm(zones.copy().iterrows(), total=zones.shape[0]):
             from_zone_id=from_z['zone_id']
             raptor_z = raptor.loc[raptor['zone_id'] == from_zone_id]
             for _, to_z in zones.copy().iterrows():
@@ -279,7 +279,7 @@ class AccessibilityEvaluator:
             zones = gpd.GeoDataFrame(zones, geometry='buffered_geometry', crs=zones.crs)
 
             raptor_k.to_crs(epsg=epsg, inplace=True)
-            for _, v in zones.iterrows():
+            for _, v in tqdm(zones.iterrows(), total=zones.shape[0]):
                 zone_id = v['zone_id']
                 raptor_z = raptor_k.loc[raptor_k['zone_id'] == zone_id]
 
@@ -318,10 +318,10 @@ class GeneralAccessibilityEvaluator:
 
 
         # разница в процентах достижимых зон между обычным человеком и инвалидом по максимальному количеству пересадок 
-        self.zones_values['A0_delta']=self.zones_values['A0_all']-self.zones_values[f'A0_{self.restr_type}']
-        self.zones_values['A1_delta']=self.zones_values['A1_all']-self.zones_values[f'A1_{self.restr_type}']
-        self.zones_values['A2_delta']=self.zones_values['A2_all']-self.zones_values[f'A2_{self.restr_type}']
-        self.zones_values['A3_delta']=self.zones_values['A3_all']-self.zones_values[f'A3_{self.restr_type}']
+        self.zones_values['A0_delta']=abs(self.zones_values['A0_all']-self.zones_values[f'A0_{self.restr_type}'])
+        self.zones_values['A1_delta']=abs(self.zones_values['A1_all']-self.zones_values[f'A1_{self.restr_type}'])
+        self.zones_values['A2_delta']=abs(self.zones_values['A2_all']-self.zones_values[f'A2_{self.restr_type}'])
+        self.zones_values['A3_delta']=abs(self.zones_values['A3_all']-self.zones_values[f'A3_{self.restr_type}'])
 
         self.zones_values[f'A_all']=0.25*self.zones_values['A0_all']+0.25*self.zones_values['A1_all']+0.25*self.zones_values['A2_all']+0.25*self.zones_values['A3_all']
         self.zones_values[f'A_{self.restr_type}']=0.25*self.zones_values[f'A0_{self.restr_type}']+0.25*self.zones_values[f'A1_{self.restr_type}']+0.25*self.zones_values[f'A2_{self.restr_type}']+0.25*self.zones_values[f'A3_{self.restr_type}']
@@ -376,21 +376,28 @@ class GeneralAccessibilityEvaluator:
         plt.show()
 
     def plot_distribution(self):
-        plt.figure(figsize=(12, 12))
+        
         
         for i, col in enumerate(['A0', 'A1', 'A2', 'A3']):
-            plt.subplot(2, 2, i + 1)
+            plt.figure(figsize=(8, 8))
+            #plt.subplot(2, 2, i + 1)
             sns.histplot(self.zones_all[col], color='blue', label='Обычный режим', alpha=0.25, kde=True)
             sns.histplot(self.zones_restr[col], color='red', label='Режим безбарьерного доступа', alpha=0.25, kde=True)
-            plt.title(f'Процент достижимых зон {col}')
+            plt.title(f'Процент достижимых районов R({col[-1:]})')
+            plt.xlabel('')
+            plt.ylabel('')
+            if i==0:
+                plt.xlim(0, 1)
+            elif i==1:
+                plt.xlim(0, 1)
             if i==2: 
                 plt.xlim(0.6, 1)
             elif i==3:
                 plt.xlim(0.9, 1)
             plt.legend()
         
-        plt.tight_layout()
-        plt.show()
+            plt.tight_layout()
+            plt.show()
     def plot_cdf(self):
         plt.figure(figsize=(10, 6))
         
@@ -409,7 +416,7 @@ class GeneralAccessibilityEvaluator:
         plt.show()            
 
 
-    def measure_Traveltime(self, od_all: pd.DataFrame, od_restr: pd.DataFrame, time=480, subtract=False, plot=True):
+    def measure_Traveltime(self, od_all: pd.DataFrame, od_restr: pd.DataFrame, subtract=False, plot=True):
         TIME = self.time
         
         def subtract_departure_time(row):
@@ -484,7 +491,7 @@ class GeneralAccessibilityEvaluator:
             plt.figure(figsize=(10, 6))
             plt.hist(df_filtered['delta_time'].dropna(), bins=50, color='blue', edgecolor='black')
             plt.xlabel('Разница во времени (мин)')
-            plt.ylabel('Количество пар зон')
+            plt.ylabel('Количество пар районов')
             plt.title('Распределение разницы во времени между обычным режимом и режимом безбарьерного доступа')
             plt.grid(True)
             plt.show()
@@ -493,67 +500,11 @@ class GeneralAccessibilityEvaluator:
             plt.figure(figsize=(10, 6))
             plt.hist(df_filtered['delta_transfers'].dropna(), bins=50, color='green', edgecolor='black')
             plt.xlabel('Разница в количестве пересадок')
-            plt.ylabel('Количество пар зон')
+            plt.ylabel('Количество пар районов')
             plt.title('Распределение разницы в количестве пересадок между обычным режимом и режимом безбарьерного доступа')
             plt.grid(True)
             plt.show()
-    def measure_Traveltime2(self, od_all: pd.DataFrame, od_restr: pd.DataFrame, time=480, subtract=False, plot=True):
-        TIME = time
-        
-        def subtract_departure_time(row):
-            if row['arrival'] != 0:
-                return row['arrival'] - TIME
-            else:
-                return 0
-        
-        if subtract:
-            # Применение функции к колонке arrival
-            od_all['arrival'] = od_all.apply(subtract_departure_time, axis=1)
-            od_restr['arrival'] = od_restr.apply(subtract_departure_time, axis=1)
 
-        # Объединяем матрицы по парам (from, to)
-        df = pd.merge(od_all, od_restr, on=['from', 'to'], suffixes=('_regular', '_prm'))
-        
-        # Вычисляем разницу во времени и количестве пересадок
-        df['delta_time'] = (df['arrival_prm'] - df['arrival_regular']).abs()
-        df['delta_transfers'] = (df['transfers_prm'] - df['transfers_regular']).abs()
-        
-        # Группируем по зоне from и вычисляем средние значения
-        agg_od_diff = df.groupby('from').agg({
-            'delta_time': 'mean',
-            'delta_transfers': 'mean'
-        }).reset_index()
-        
-        # Присваиваем значения напрямую через индексы
-        self.zones_values['mean_delta_time'] = self.zones_values['from'].map(agg_od_diff.set_index('from')['delta_time'])
-        self.zones_values['mean_transfers_delta'] = self.zones_values['from'].map(agg_od_diff.set_index('from')['delta_transfers'])
-
-        # Подсчитываем количество пар зон с пустыми значениями arrival и transfers
-        unreach_all = od_all[od_all['arrival'].isna() | od_all['transfers'].isna()].groupby('from').size()
-        unreach_restr = od_restr[od_restr['arrival'].isna() | od_restr['transfers'].isna()].groupby('from').size()
-
-        # Присваиваем значения напрямую через индексы
-        self.zones_values['unreach_all'] = self.zones_values['from'].map(unreach_all).fillna(0)
-        self.zones_values[f'unreach_{self.restr_type}'] = self.zones_values['from'].map(unreach_restr).fillna(0)
-
-        if plot:
-            # Гистограмма распределения Δ_time
-            plt.figure(figsize=(10, 6))
-            plt.hist(df['delta_time'].dropna(), bins=50, color='blue', edgecolor='black')
-            plt.xlabel('Разница во времени (мин)')
-            plt.ylabel('Количество пар зон')
-            plt.title('Распределение разницы во времени между обычным режимом и режимом для инвалидов')
-            plt.grid(True)
-            plt.show()
-            
-            # Гистограмма распределения Δ_transfers
-            plt.figure(figsize=(10, 6))
-            plt.hist(df['delta_transfers'].dropna(), bins=50, color='green', edgecolor='black')
-            plt.xlabel('Разница в количестве пересадок')
-            plt.ylabel('Количество пар зон')
-            plt.title('Распределение разницы в количестве пересадок между обычным режимом и режимом для инвалидов')
-            plt.grid(True)
-            plt.show()
     def clusterize(self, plot=True):
         # Выбираем признаки для кластеризации
         X = self.zones_values[['A0_delta', 'A1_delta', 'A2_delta', 'A3_delta']]

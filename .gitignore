@@ -16,3 +16,5 @@ overall_A.qml
 *.png
 !kja/kja_tdgraph_evals.ipynb
 !perm/perm_tdgraph_evals.ipynb
+!spe/spe_static_evals.ipynb
+!msc/msc_static_evals.ipynb
